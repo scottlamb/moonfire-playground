@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<s:Envelope xmlns:sc="http://www.w3.org/2003/05/soap-encoding" xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2" xmlns:tev="http://www.onvif.org/ver10/events/wsdl" xmlns:wsa5="http://www.w3.org/2005/08/addressing" xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:wstop="http://docs.oasis-open.org/wsn/t-1" xmlns:tns1="http://www.onvif.org/ver10/topics" xmlns:tt="http://www.onvif.org/ver10/schema">
+  <s:Header/>
+  <s:Body>
+    <tev:PullMessagesResponse>
+      <tev:CurrentTime>2019-02-11T14:16:01Z</tev:CurrentTime>
+      <tev:TerminationTime>2019-02-11T14:16:42Z</tev:TerminationTime>
+      <wsnt:NotificationMessage>
+        <wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:RuleEngine/CellMotionDetector/Motion</wsnt:Topic>
+        <wsnt:Message>
+          <tt:Message UtcTime="2019-02-11T14:16:02Z" PropertyOperation="Initialized">
+            <tt:Source>
+              <tt:SimpleItem Name="VideoSourceConfigurationToken" Value="000"/>
+              <tt:SimpleItem Name="VideoAnalyticsConfigurationToken" Value="000"/>
+              <tt:SimpleItem Name="Rule" Value="000"/>
+            </tt:Source>
+            <tt:Data>
+              <tt:SimpleItem Name="IsMotion" Value="false"/>
+            </tt:Data>
+          </tt:Message>
+        </wsnt:Message>
+      </wsnt:NotificationMessage>
+      <wsnt:NotificationMessage>
+        <wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:Monitoring/ProcessorUsage</wsnt:Topic>
+        <wsnt:Message>
+          <tt:Message UtcTime="2019-02-11T14:16:02Z" PropertyOperation="Initialized">
+            <tt:Source>
+              <tt:SimpleItem Name="Token" Value="000"/>
+            </tt:Source>
+            <tt:Data>
+              <tt:SimpleItem Name="Value" Value="0.630000"/>
+            </tt:Data>
+          </tt:Message>
+        </wsnt:Message>
+      </wsnt:NotificationMessage>
+      <wsnt:NotificationMessage>
+        <wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:Monitoring/OperatingTime/LastReboot</wsnt:Topic>
+        <wsnt:Message>
+          <tt:Message UtcTime="2019-02-11T14:16:02Z" PropertyOperation="Initialized">
+            <tt:Data>
+              <tt:SimpleItem Name="Status" Value="2019-02-10T21:52:37Z"/>
+            </tt:Data>
+          </tt:Message>
+        </wsnt:Message>
+      </wsnt:NotificationMessage>
+      <wsnt:NotificationMessage>
+        <wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:Monitoring/OperatingTime/LastReset</wsnt:Topic>
+        <wsnt:Message>
+          <tt:Message UtcTime="2019-02-11T14:16:02Z" PropertyOperation="Initialized">
+            <tt:Data>
+              <tt:SimpleItem Name="Status" Value="1970-01-01T00:00:00Z"/>
+            </tt:Data>
+          </tt:Message>
+        </wsnt:Message>
+      </wsnt:NotificationMessage>
+      <wsnt:NotificationMessage>
+        <wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:Monitoring/OperatingTime/LastClockSynchronization</wsnt:Topic>
+        <wsnt:Message>
+          <tt:Message UtcTime="2019-02-11T14:16:02Z" PropertyOperation="Initialized">
+            <tt:Data>
+              <tt:SimpleItem Name="Status" Value="1970-01-01T00:00:00Z"/>
+            </tt:Data>
+          </tt:Message>
+        </wsnt:Message>
+      </wsnt:NotificationMessage>
+    </tev:PullMessagesResponse>
+  </s:Body>
+</s:Envelope>
