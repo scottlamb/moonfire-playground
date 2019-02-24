@@ -42,6 +42,7 @@ extern crate pretty_hex;
 extern crate regex;
 extern crate reqwest;
 extern crate rusqlite;
+#[cfg_attr(test, macro_use)] extern crate serde_json;
 extern crate slog;
 extern crate slog_envlogger;
 extern crate slog_stdlog;

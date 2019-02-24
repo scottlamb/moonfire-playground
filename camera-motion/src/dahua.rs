@@ -88,6 +88,7 @@ impl super::Watcher for Watcher {
                               .send()?;
         }
 
+        let mut motion = false;
         let mut resp = resp.error_for_status()?;
         foreach_part(&mut resp, "x-mixed-replace", "\r\n\r\n", &mut |p: Part| {
             let m = p.headers.get(header::CONTENT_TYPE)
@@ -95,8 +96,22 @@ impl super::Watcher for Watcher {
             if m.as_bytes() != b"text/plain" {
                 bail!("Unexpected part Content-Type {:?}", m);
             }
-            use pretty_hex::PrettyHex;
-            println!("{:?}", p.body.hex_dump());
+            let e = Event::parse(::std::str::from_utf8(p.body)?)?;
+            debug!("event: {:#?}", &e);
+            if e.code != "VideoMotion" {
+                return Ok(());  // from the closure.
+            }
+            match e.action.as_str() {
+                "Start" if !motion => {
+                    info!("{}: motion event started", self.name);
+                    motion = true;
+                },
+                "Stop" if motion => {
+                    info!("{}: motion event ended", self.name);
+                    motion = false;
+                },
+                _ => bail!("can't understand motion event {:#?}", e),
+            }
             Ok(())
         })
     }
@@ -181,9 +196,37 @@ impl<'a> DigestAuthentication<'a> {
     }
 }
 
+#[derive(Debug, PartialEq)]
+pub struct Event {
+    pub code: String,
+    pub action: String,
+    pub index: u32,
+    pub data: Option<serde_json::Value>,
+}
+
+impl Event {
+    pub fn parse(raw: &str) -> Result<Event, Error> {
+        lazy_static! {
+            static ref EVENT: Regex = Regex::new(
+                r"(?s)^Code=([^;]+);action=([^;]+);index=([0-9]+)(?:;data=(\{.*\}))?\s*$").unwrap();
+        }
+        let m = EVENT.captures(raw).ok_or_else(|| format_err!("unparseable event: {:?}", raw))?;
+        Ok(Self {
+            code: m.get(1).expect("code").as_str().to_owned(),
+            action: m.get(2).expect("action").as_str().to_owned(),
+            index: m.get(3).expect("index").as_str().parse()?,
+            data: match m.get(4) {
+                None => None,
+                Some(d) => Some(serde_json::from_str(d.as_str())?),
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use http::header::HeaderValue;
+    use super::Event;
 
     #[test]
     fn parse_www_authenticate() {
@@ -227,5 +270,82 @@ mod tests {
                    qop=auth, \
                    response=\"8ca523f5e9506fed4657c9700eebdbec\", \
                    opaque=\"FQhe/qaU925kfnzjCev0ciny7QMkPqMAFRtzCUYo5tdS\"");
+    }
+
+    #[test]
+    fn parse_time_change() {
+        let raw = concat!("Code=TimeChange;action=Pulse;index=0;data={\n",
+                           "   \"BeforeModifyTime\" : \"2019-02-24 12:25:00\",\n",
+                           "   \"ModifiedTime\" : \"2019-02-24 12:25:00\"\n",
+                           "}\n");
+        assert_eq!(Event::parse(raw).unwrap(), Event {
+            code: "TimeChange".to_owned(),
+            action: "Pulse".to_owned(),
+            index: 0,
+            data: Some(json!({
+                "BeforeModifyTime": "2019-02-24 12:25:00",
+                "ModifiedTime": "2019-02-24 12:25:00",
+            })),
+        });
+    }
+
+    #[test]
+    fn parse_ntp_adjust_time() {
+        let raw = concat!("Code=NTPAdjustTime;action=Pulse;index=0;data={\n",
+                           "   \"Address\" : \"192.168.5.24\",\n",
+                           "   \"Before\" : \"2019-02-24 12:24:59\",\n",
+                           "   \"result\" : true\n",
+                           "}\n");
+        assert_eq!(Event::parse(raw).unwrap(), Event {
+            code: "NTPAdjustTime".to_owned(),
+            action: "Pulse".to_owned(),
+            index: 0,
+            data: Some(json!({
+                "Address": "192.168.5.24",
+                "Before": "2019-02-24 12:24:59",
+                "result": true,
+            })),
+        });
+    }
+
+    #[test]
+    fn parse_video_motion_info_state() {
+        let raw = "Code=VideoMotionInfo;action=State;index=0";
+        assert_eq!(Event::parse(raw).unwrap(), Event {
+            code: "VideoMotionInfo".to_owned(),
+            action: "State".to_owned(),
+            index: 0,
+            data: None,
+        });
+    }
+
+    #[test]
+    fn parse_video_motion_start() {
+        let raw = concat!("Code=VideoMotion;action=Start;index=0;data={\n",
+                           "   \"RegionName\" : [\"Region1\" ]\n",
+                           "}\n");
+        assert_eq!(Event::parse(raw).unwrap(), Event {
+            code: "VideoMotion".to_owned(),
+            action: "Start".to_owned(),
+            index: 0,
+            data: Some(json!({
+                "RegionName": ["Region1"],
+            })),
+        });
+    }
+
+    #[test]
+    fn parse_video_motion_stop() {
+        let raw = concat!("Code=VideoMotion;action=Stop;index=0;data={\n",
+                           "   \"RegionName\" : [\"Region1\" ]\n",
+                           "}\n");
+        assert_eq!(Event::parse(raw).unwrap(), Event {
+            code: "VideoMotion".to_owned(),
+            action: "Stop".to_owned(),
+            index: 0,
+            data: Some(json!({
+                "RegionName": ["Region1"],
+            })),
+        });
     }
 }
