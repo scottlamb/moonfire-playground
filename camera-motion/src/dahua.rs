@@ -30,9 +30,10 @@
 
 //! Dahua on-camera motion detection.
 
+use crate::multipart::{Part, foreach_part};
+use crate::nvr;
 use failure::{bail, format_err, Error};
 use http::header::{self, HeaderValue};
-use multipart::{Part, foreach_part};
 use openssl::hash;
 use regex::Regex;
 use reqwest::Client;
@@ -46,21 +47,26 @@ pub struct Watcher {
     name: String,
     client: Client,
     url: Url,
-    user: String,
-    passwd: String,
+    username: String,
+    password: String,
+    nvr: &'static nvr::Client,
+    signal_id: u32,
 }
 
 impl Watcher {
-    pub fn new(name: String, host: &str, user: impl Into<String>, passwd: impl Into<String>) -> Result<Self, Error> {
+    pub fn new(name: String, config: &nvr::CameraConfig, nvr: &'static nvr::Client, signal_id: u32)
+               -> Result<Self, Error> {
         let client = Client::builder()
             .timeout(Some(IO_TIMEOUT))
             .build()?;
         Ok(Watcher {
             name,
             client,
-            url: Url::parse(&format!("http://{}{}", host, ATTACH_URL))?,
-            user: user.into(),
-            passwd: passwd.into(),
+            url: Url::parse(&format!("http://{}{}", &config.host, ATTACH_URL))?,
+            username: config.username.clone(),
+            password: config.password.clone(),
+            nvr,
+            signal_id,
         })
     }
 }
@@ -78,8 +84,8 @@ impl super::Watcher for Watcher {
                 d.create(DigestParams {
                     method: "GET",
                     uri: ATTACH_URL,
-                    username: &self.user,
-                    passwd: &self.passwd,
+                    username: &self.username,
+                    password: &self.password,
                     cnonce: &random_cnonce(),
                 })
             };
@@ -112,6 +118,7 @@ impl super::Watcher for Watcher {
                 },
                 _ => bail!("can't understand motion event {:#?}", e),
             }
+            self.nvr.update_signals(&[self.signal_id], &[if motion { 2 } else { 1 }])?;
             Ok(())
         })
     }
@@ -130,7 +137,7 @@ struct DigestParams<'a> {
     method: &'a str,
     uri: &'a str,
     username: &'a str,
-    passwd: &'a str,
+    password: &'a str,
     cnonce: &'a str,
 }
 
@@ -182,7 +189,7 @@ impl<'a> DigestAuthentication<'a> {
     }
 
     fn create(&self, p: DigestParams) -> HeaderValue {
-        let h_a1 = h(&[p.username.as_bytes(), b":", self.realm.as_bytes(), b":", p.passwd.as_bytes()]);
+        let h_a1 = h(&[p.username.as_bytes(), b":", self.realm.as_bytes(), b":", p.password.as_bytes()]);
         let h_a2 = h(&[p.method.as_bytes(), b":", p.uri.as_bytes()]);
         let nc = "00000001";
         let response = h(&[h_a1.as_bytes(), b":",
@@ -256,7 +263,7 @@ mod tests {
             method: "GET",
             uri: "/dir/index.html",
             username: "Mufasa",
-            passwd: "Circle of Life",
+            password: "Circle of Life",
             cnonce: "f2/wE4q74E6zIJEtWaHKaf5wv/H5QzzpXusqGemxURZJ",
         });
         assert_eq!(v.to_str().unwrap(),

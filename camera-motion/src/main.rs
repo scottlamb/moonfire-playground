@@ -28,56 +28,45 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-extern crate base64;
-extern crate bytes;
-extern crate docopt;
-extern crate failure;
-extern crate http;
-extern crate httparse;
 #[macro_use] extern crate lazy_static;
 #[macro_use] extern crate log;
-extern crate mime;
-extern crate openssl;
-extern crate pretty_hex;
-extern crate regex;
-extern crate reqwest;
-extern crate rusqlite;
 #[cfg_attr(test, macro_use)] extern crate serde_json;
-extern crate slog;
-extern crate slog_envlogger;
-extern crate slog_stdlog;
-extern crate slog_term;
-extern crate xml;
 
 mod dahua;
 mod hikvision;
 mod multipart;
+mod nvr;
 
 use docopt::Docopt;
 use failure::Error;
+use fnv::FnvHashMap;
+use http::header::HeaderValue;
+use reqwest::Url;
 use std::thread;
+use uuid::Uuid;
 
-const HIK_CAMERAS: [(&'static str, &'static str); 5] = [
-    ("back_west", "192.168.5.101"),
-    ("back_east", "192.168.5.102"),
-    ("courtyard", "192.168.5.103"),
-    ("west_side", "192.168.5.104"),
-    ("garage",    "192.168.5.106"),
+/*const HIK_CAMERAS: [(&'static str, &'static str, ); 5] = [
+    // name       ip                signal_id
+    ("back_west", "192.168.5.101",  1),
+    ("back_east", "192.168.5.102",  2),
+    ("courtyard", "192.168.5.103",  3),
+    ("west_side", "192.168.5.104",  4),
+    ("garage",    "192.168.5.106",  5),
 ];
 
 const DAHUA_CAMERAS: [(&'static str, &'static str); 1] = [
-    ("driveway",    "192.168.5.108"),
-];
+    ("driveway",    "192.168.5.108", 6),
+];*/
 
 const USAGE: &'static str = "
 Usage:
-  camera-motion --password=PASSWORD
+  camera-motion [--cookie=COOKIE] --nvr=URL
   camera-motion (-h | --help)
 ";
 
 fn init_logging() {
     use slog::DrainExt;
-    let drain = slog_term::StreamerBuilder::new().async().full().build();
+    let drain = slog_term::StreamerBuilder::new().r#async().full().build();
     let drain = slog_envlogger::new(drain);
     slog_stdlog::set_logger(slog::Logger::root(drain.ignore_err(), None)).unwrap();
 }
@@ -86,10 +75,10 @@ trait Watcher {
     fn watch_once(&self) -> Result<(), Error> ;
 }
 
-fn watch_forever(name: &'static str, w: &Watcher) {
+fn watch_forever(name: String, w: &Watcher) {
     loop {
         if let Err(e) = w.watch_once() {
-            error!("{}: {}", name, e);
+            error!("{}: {}", &name, e);
             std::thread::sleep(std::time::Duration::from_secs(5));
         }
     }
@@ -98,21 +87,48 @@ fn watch_forever(name: &'static str, w: &Watcher) {
 fn main() {
     init_logging();
     let args = Docopt::new(USAGE).and_then(|d| d.parse()).unwrap_or_else(|e| e.exit());
-    let password: &str = args.get_str("--password");
+    let cookie = args.find("--cookie")
+                     .map(|v| HeaderValue::from_str(v.as_str()).unwrap());
+    let nvr = Url::parse(args.get_str("--nvr")).unwrap();
+    let nvr = Box::leak(Box::new(nvr::Client::new(nvr, cookie)));
+    let top_level = nvr.top_level(&nvr::TopLevelRequest {
+        days: false,
+        camera_configs: true,
+    }).unwrap();
+    println!("{:?}", top_level);
     let mut threads = Vec::new();
-    for &(name, host) in &HIK_CAMERAS {
-        let w = hikvision::Watcher::new(name.to_owned(), host, "admin", password).unwrap();
-        threads.push(thread::Builder::new().name(name.to_owned())
-                                           .spawn(move|| watch_forever(name, &w))
-                                           .expect("can't create thread"));
-        info!("starting thread for hikvision camera {}", name);
+
+    let dahua_uuid = Uuid::parse_str("ee66270f-d9c6-4819-8b33-9720d4cbca6b").unwrap();
+    let hikvision_uuid = Uuid::parse_str("18bf0756-2120-4fbc-99d1-a367b10ef297").unwrap();
+
+    let mut cameras_by_uuid =
+        FnvHashMap::with_capacity_and_hasher(top_level.cameras.len(), Default::default());
+    for c in &top_level.cameras {
+        cameras_by_uuid.insert(c.uuid, c);
     }
-    for &(name, host) in &DAHUA_CAMERAS {
-        let w = dahua::Watcher::new(name.to_owned(), host, "admin", password).unwrap();
-        threads.push(thread::Builder::new().name(name.to_owned())
-                                           .spawn(move|| watch_forever(name, &w))
-                                           .expect("can't create thread"));
-        info!("starting thread for dahua camera {}", name);
+    for s in &top_level.signals {
+        println!("signal s: {:?}", s);
+        let c = match cameras_by_uuid.get(&s.source) {
+            None => continue,
+            Some(c) => c,
+        };
+        println!("has camera");
+        let config = c.config.as_ref().unwrap();
+        if s.type_ == dahua_uuid {
+            let name = c.short_name.clone();
+            let w = dahua::Watcher::new(name.clone(), config, nvr, s.id).unwrap();
+            info!("starting thread for dahua camera {}", &name);
+            threads.push(thread::Builder::new().name(name.clone())
+                                               .spawn(move || watch_forever(name, &w))
+                                               .expect("can't create thread"));
+        } else if s.type_ == hikvision_uuid {
+            let name = c.short_name.clone();
+            let w = hikvision::Watcher::new(name.clone(), config, nvr, s.id).unwrap();
+            info!("starting thread for hikvision camera {}", &name);
+            threads.push(thread::Builder::new().name(name.clone())
+                                               .spawn(move || watch_forever(name, &w))
+                                               .expect("can't create thread"));
+        }
     }
     info!("all threads started");
     for t in threads.drain(..) {

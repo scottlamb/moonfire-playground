@@ -49,10 +49,11 @@
 //!      apparently useless.
 
 use bytes::{BufMut, BytesMut};
+use crate::multipart::{Part, foreach_part};
+use crate::nvr;
 use failure::{bail, format_err, Error};
 use http::header::{self, HeaderValue};
 use mime;
-use multipart::{Part, foreach_part};
 use reqwest::Client;
 use reqwest::Url;
 use std::io::Write;
@@ -73,10 +74,13 @@ pub struct Watcher {
     client: Client,
     url: Url,
     auth: HeaderValue,
+    nvr: &'static nvr::Client,
+    signal_id: u32,
 }
 
 impl Watcher {
-    pub fn new(name: String, host: &str, user: &str, password: &str) -> Result<Self, Error> {
+    pub fn new(name: String, config: &nvr::CameraConfig, nvr: &'static nvr::Client, signal_id: u32)
+               -> Result<Self, Error> {
         // TODO: is there a separate connect timeout?
         let client = Client::builder()
             .timeout(Some(IO_TIMEOUT))
@@ -84,8 +88,10 @@ impl Watcher {
         Ok(Watcher {
             name,
             client,
-            url: Url::parse(&format!("http://{}/Event/notification/alertStream", host))?,
-            auth: basic_auth(user, password),
+            url: Url::parse(&format!("http://{}/Event/notification/alertStream", &config.host))?,
+            auth: basic_auth(&config.username, &config.password),
+            nvr,
+            signal_id,
         })
     }
 }
@@ -120,6 +126,7 @@ impl super::Watcher for Watcher {
                 info!("{}: motion event ended", self.name);
                 vmd_active = false;
             }
+            self.nvr.update_signals(&[self.signal_id], &[if vmd_active { 2 } else { 1 }])?;
             Ok(())
         })
     }
