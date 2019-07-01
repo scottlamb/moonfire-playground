@@ -9,7 +9,7 @@ use url::Url;
 
 const USAGE: &'static str = "
 Usage:
-  onvif --password=PASSWORD
+  onvif --base_url=URL --username=USERNAME --password=PASSWORD
   onvif (-h | --help)
 ";
 
@@ -94,11 +94,9 @@ impl Drop for Subscription {
 
 fn main() {
     let args = Docopt::new(USAGE).and_then(|d| d.parse()).unwrap_or_else(|e| e.exit());
+    let base_url = Url::parse(args.get_str("--base_url")).unwrap();
+    let username: &str = args.get_str("--username");
     let password: &str = args.get_str("--password");
-    let base_url = Url::parse("http://192.168.5.108/").unwrap();
-    //let base_url = Url::parse("http://192.168.5.106/").unwrap();
-    //let base_url = Url::parse("http://127.0.0.1:8888/").unwrap();
-    let username = "admin";
 
     let mut s =
         Subscription::new(base_url.clone(), username.to_owned(), password.to_owned()).unwrap();
