@@ -118,7 +118,7 @@ impl super::Watcher for Watcher {
                 (Some(t), Some(a)) => (t, a),
                 _ => bail!("body {:?} must specify event type and state", p.body),
             };
-            trace!("{}: notification: {} active={}", self.name, event_type, active);
+            debug!("{}: notification: {} active={}", self.name, event_type, active);
             if event_type == "VMD" && active && !vmd_active {
                 info!("{}: motion event started", self.name);
                 vmd_active = true;
@@ -126,7 +126,9 @@ impl super::Watcher for Watcher {
                 info!("{}: motion event ended", self.name);
                 vmd_active = false;
             }
+            trace!("{}: updating signals...", self.name);
             self.nvr.update_signals(&[self.signal_id], &[if vmd_active { 2 } else { 1 }])?;
+            trace!("{}: ...done updating signals", self.name);
             Ok(())
         })
     }
@@ -151,7 +153,6 @@ fn parse(body: &[u8]) -> Result<Notification, Error> {
     loop {
         match reader.next()? {
             xml::reader::XmlEvent::StartElement{name, ..} => {
-                trace!("...starting element: {:?}", name);
                 depth += 1;
                 let in_expected_ns = match name.namespace_ref() {
                     None => false,

@@ -64,13 +64,6 @@ Usage:
   camera-motion (-h | --help)
 ";
 
-fn init_logging() {
-    use slog::DrainExt;
-    let drain = slog_term::StreamerBuilder::new().r#async().full().build();
-    let drain = slog_envlogger::new(drain);
-    slog_stdlog::set_logger(slog::Logger::root(drain.ignore_err(), None)).unwrap();
-}
-
 trait Watcher {
     fn watch_once(&self) -> Result<(), Error> ;
 }
@@ -84,8 +77,24 @@ fn watch_forever(name: String, w: &Watcher) {
     }
 }
 
+fn parse_fmt<S: AsRef<str>>(fmt: S) -> Option<mylog::Format> {
+    match fmt.as_ref() {
+        "google" => Some(mylog::Format::Google),
+        "google-systemd" => Some(mylog::Format::GoogleSystemd),
+        _ => None,
+    }
+}
+
 fn main() {
-    init_logging();
+    let mut h = mylog::Builder::new()
+        .set_format(::std::env::var("MOONFIRE_FORMAT")
+                    .ok()
+                    .and_then(parse_fmt)
+                    .unwrap_or(mylog::Format::Google))
+        .set_spec(&::std::env::var("MOONFIRE_LOG").unwrap_or("info".to_owned()))
+        .build();
+    h.clone().install().unwrap();
+    let _a = h.r#async();
     let args = Docopt::new(USAGE).and_then(|d| d.parse()).unwrap_or_else(|e| e.exit());
     let cookie = args.find("--cookie")
                      .map(|v| HeaderValue::from_str(v.as_str()).unwrap());
@@ -95,7 +104,6 @@ fn main() {
         days: false,
         camera_configs: true,
     }).unwrap();
-    println!("{:?}", top_level);
     let mut threads = Vec::new();
 
     let dahua_uuid = Uuid::parse_str("ee66270f-d9c6-4819-8b33-9720d4cbca6b").unwrap();
@@ -107,12 +115,10 @@ fn main() {
         cameras_by_uuid.insert(c.uuid, c);
     }
     for s in &top_level.signals {
-        println!("signal s: {:?}", s);
         let c = match cameras_by_uuid.get(&s.source) {
             None => continue,
             Some(c) => c,
         };
-        println!("has camera");
         let config = c.config.as_ref().unwrap();
         if s.type_ == dahua_uuid {
             let name = c.short_name.clone();
