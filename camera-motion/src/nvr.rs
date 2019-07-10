@@ -157,7 +157,7 @@ impl Client {
             states,
             start_time_90k: None,
             end_base: PostSignalsEndBase::Now,
-            rel_end_time_90k: None,
+            rel_end_time_90k: Some(30 * 90000),
         };
         let mut req = self.client.post(self.base_url.join("/api/signals").unwrap());
         if let Some(c) = self.cookie.as_ref() {
