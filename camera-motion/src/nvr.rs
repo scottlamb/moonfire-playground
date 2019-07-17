@@ -33,7 +33,7 @@ pub struct Camera {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct CameraConfig {
-    pub host: String,
+    pub onvif_host: Option<String>,
     pub username: String,
     pub password: String,
 }
@@ -152,6 +152,7 @@ impl Client {
     }
 
     pub fn update_signals(&self, signal_ids: &[u32], states: &[u16]) -> Result<i64, Error> {
+        debug!("update_signals: {:?} -> {:?}", signal_ids, states);
         let body = &PostSignalsRequest {
             signal_ids,
             states,

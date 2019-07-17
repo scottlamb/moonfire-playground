@@ -65,10 +65,10 @@ Usage:
 ";
 
 trait Watcher {
-    fn watch_once(&self) -> Result<(), Error> ;
+    fn watch_once(&mut self) -> Result<(), Error> ;
 }
 
-fn watch_forever(name: String, w: &Watcher) {
+fn watch_forever(name: String, w: &mut Watcher) {
     loop {
         if let Err(e) = w.watch_once() {
             error!("{}: {}", &name, e);
@@ -82,6 +82,31 @@ fn parse_fmt<S: AsRef<str>>(fmt: S) -> Option<mylog::Format> {
         "google" => Some(mylog::Format::Google),
         "google-systemd" => Some(mylog::Format::GoogleSystemd),
         _ => None,
+    }
+}
+
+/// Retries HTTP and server errors for a while.
+fn retry_http<T>(desc: &str, mut f: impl FnMut() -> Result<T, Error>) -> Result<T, Error> {
+    const MAX_ATTEMPTS: usize = 60;
+    let mut attempt = 1;
+    loop {
+        let e = match f() {
+            Ok(t) => return Ok(t),
+            Err(e) => e,
+        };
+        let re = match e.downcast_ref::<reqwest::Error>() {
+            None => return Err(e),
+            Some(e) => e,
+        };
+        if !re.is_http() && !re.is_server_error() {
+            return Err(e);
+        }
+        warn!("{}: attempt {}/{}: {}", desc, attempt, MAX_ATTEMPTS, e);
+        if attempt == 60 {
+            return Err(e.context(format!("Last of {} attempts", attempt)).into());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        attempt += 1;
     }
 }
 
@@ -100,10 +125,11 @@ fn main() {
                      .map(|v| HeaderValue::from_str(v.as_str()).unwrap());
     let nvr = Url::parse(args.get_str("--nvr")).unwrap();
     let nvr = Box::leak(Box::new(nvr::Client::new(nvr, cookie)));
-    let top_level = nvr.top_level(&nvr::TopLevelRequest {
+    let top_level = retry_http("get camera configs from nvr",
+                               || nvr.top_level(&nvr::TopLevelRequest {
         days: false,
         camera_configs: true,
-    }).unwrap();
+    })).unwrap();
     let mut threads = Vec::new();
 
     let dahua_uuid = Uuid::parse_str("ee66270f-d9c6-4819-8b33-9720d4cbca6b").unwrap();
@@ -122,17 +148,17 @@ fn main() {
         let config = c.config.as_ref().unwrap();
         if s.type_ == dahua_uuid {
             let name = c.short_name.clone();
-            let w = dahua::Watcher::new(name.clone(), config, nvr, s.id).unwrap();
+            let mut w = dahua::Watcher::new(name.clone(), config, nvr, s.id).unwrap();
             info!("starting thread for dahua camera {}", &name);
             threads.push(thread::Builder::new().name(name.clone())
-                                               .spawn(move || watch_forever(name, &w))
+                                               .spawn(move || watch_forever(name, &mut w))
                                                .expect("can't create thread"));
         } else if s.type_ == hikvision_uuid {
             let name = c.short_name.clone();
-            let w = hikvision::Watcher::new(name.clone(), config, nvr, s.id).unwrap();
+            let mut w = hikvision::Watcher::new(name.clone(), config, nvr, s.id).unwrap();
             info!("starting thread for hikvision camera {}", &name);
             threads.push(thread::Builder::new().name(name.clone())
-                                               .spawn(move || watch_forever(name, &w))
+                                               .spawn(move || watch_forever(name, &mut w))
                                                .expect("can't create thread"));
         }
     }

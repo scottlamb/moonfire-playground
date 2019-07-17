@@ -38,10 +38,16 @@ use openssl::hash;
 use regex::Regex;
 use reqwest::Client;
 use reqwest::Url;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 static IO_TIMEOUT: Duration = Duration::from_secs(120);
 static ATTACH_URL: &'static str = "/cgi-bin/eventManager.cgi?action=attach&codes=%5BAll%5D";
+static UPDATE_INTERVAL: Duration = Duration::from_secs(15);
+
+struct Status {
+    as_of: Instant,
+    motion: bool,
+}
 
 pub struct Watcher {
     name: String,
@@ -51,6 +57,7 @@ pub struct Watcher {
     password: String,
     nvr: &'static nvr::Client,
     signal_id: u32,
+    status: Option<Status>,
 }
 
 impl Watcher {
@@ -59,20 +66,23 @@ impl Watcher {
         let client = Client::builder()
             .timeout(Some(IO_TIMEOUT))
             .build()?;
+        let h = config.onvif_host.as_ref()
+            .ok_or_else(|| format_err!("Dahua camera {} has no ONVIF host", &name))?;
         Ok(Watcher {
             name,
             client,
-            url: Url::parse(&format!("http://{}{}", &config.host, ATTACH_URL))?,
+            url: Url::parse(&format!("http://{}{}", &h, ATTACH_URL))?,
             username: config.username.clone(),
             password: config.password.clone(),
             nvr,
             signal_id,
+            status: None,
         })
     }
 }
 
 impl super::Watcher for Watcher {
-    fn watch_once(&self) -> Result<(), Error> {
+    fn watch_once(&mut self) -> Result<(), Error> {
         debug!("{}: watch_once call; url: {}", self.name, self.url);
         let mut resp = self.client.get(self.url.clone())
                                   .send()?;
@@ -94,7 +104,6 @@ impl super::Watcher for Watcher {
                               .send()?;
         }
 
-        let mut motion = false;
         let mut resp = resp.error_for_status()?;
         foreach_part(&mut resp, "x-mixed-replace", "\r\n\r\n", &mut |p: Part| {
             let m = p.headers.get(header::CONTENT_TYPE)
@@ -104,21 +113,37 @@ impl super::Watcher for Watcher {
             }
             let e = Event::parse(::std::str::from_utf8(p.body)?)?;
             debug!("event: {:#?}", &e);
-            if e.code != "VideoMotion" {
-                return Ok(());  // from the closure.
+            let prev_motion = self.status.as_ref().map(|s| s.motion);
+            let mut motion = prev_motion;
+            if e.code == "VideoMotion" {
+                match e.action.as_str() {
+                    "Start" if prev_motion != Some(true) => {
+                        info!("{}: motion event started", self.name);
+                        motion = Some(true);
+                    },
+                    "Stop" if prev_motion != Some(false) => {
+                        info!("{}: motion event ended", self.name);
+                        motion = Some(false);
+                    },
+                    _ => bail!("can't understand motion event {:#?}", e),
+                }
             }
-            match e.action.as_str() {
-                "Start" if !motion => {
-                    info!("{}: motion event started", self.name);
-                    motion = true;
-                },
-                "Stop" if motion => {
-                    info!("{}: motion event ended", self.name);
-                    motion = false;
-                },
-                _ => bail!("can't understand motion event {:#?}", e),
+            let motion = match motion {
+                None => return Ok(()),  // if we never learned motion state, nothing to do.
+                Some(m) => m,
+            };
+            let now = Instant::now();
+            let need_update = match self.status.as_ref() {
+                None => true,
+                Some(s) => now.duration_since(s.as_of) > UPDATE_INTERVAL,
+            };
+            if need_update {
+                self.status = Some(Status {
+                    motion,
+                    as_of: now,
+                });
+                self.nvr.update_signals(&[self.signal_id], &[if motion { 2 } else { 1 }])?;
             }
-            self.nvr.update_signals(&[self.signal_id], &[if motion { 2 } else { 1 }])?;
             Ok(())
         })
     }

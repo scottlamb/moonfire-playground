@@ -57,7 +57,7 @@ use mime;
 use reqwest::Client;
 use reqwest::Url;
 use std::io::Write;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use xml;
 
 /// Expected namespace for all XML elements in the response.
@@ -68,6 +68,12 @@ static NAMESPACES: [&'static str; 2] = [
 
 /// I/O timeout. The camera sends a few events per second, even when there's nothing to report.
 static IO_TIMEOUT: Duration = Duration::from_secs(5);
+static UPDATE_INTERVAL: Duration = Duration::from_secs(15);
+
+struct Status {
+    as_of: Instant,
+    motion: bool,
+}
 
 pub struct Watcher {
     name: String,
@@ -76,6 +82,7 @@ pub struct Watcher {
     auth: HeaderValue,
     nvr: &'static nvr::Client,
     signal_id: u32,
+    status: Option<Status>,
 }
 
 impl Watcher {
@@ -85,27 +92,31 @@ impl Watcher {
         let client = Client::builder()
             .timeout(Some(IO_TIMEOUT))
             .build()?;
+        let h = config.onvif_host.as_ref()
+            .ok_or_else(|| format_err!("Hikvision camera {} has no ONVIF host", &name))?;
         Ok(Watcher {
             name,
             client,
-            url: Url::parse(&format!("http://{}/Event/notification/alertStream", &config.host))?,
+            url: Url::parse(&format!("http://{}/Event/notification/alertStream", &h))?,
             auth: basic_auth(&config.username, &config.password),
             nvr,
             signal_id,
+            status: None,
         })
     }
 }
 
 impl super::Watcher for Watcher {
-    fn watch_once(&self) -> Result<(), Error> {
+    fn watch_once(&mut self) -> Result<(), Error> {
         debug!("{}: watch_once call; url: {}", self.name, self.url);
         let mut resp = self.client.get(self.url.clone())
                                   .header(header::AUTHORIZATION, &self.auth)
                                   .send()?
                                   .error_for_status()?;
 
-        let mut vmd_active = false;
         foreach_part(&mut resp, "mixed", "", &mut |p: Part| {
+            let prev_motion = self.status.as_ref().map(|s| s.motion);
+            let mut motion = prev_motion;
             let m: mime::Mime = p.headers.get(header::CONTENT_TYPE)
                 .ok_or_else(|| format_err!("Missing part Content-Type"))?
                 .to_str()?
@@ -119,16 +130,29 @@ impl super::Watcher for Watcher {
                 _ => bail!("body {:?} must specify event type and state", p.body),
             };
             debug!("{}: notification: {} active={}", self.name, event_type, active);
-            if event_type == "VMD" && active && !vmd_active {
+            if event_type == "VMD" && active && prev_motion != Some(true) {
                 info!("{}: motion event started", self.name);
-                vmd_active = true;
-            } else if !active && vmd_active {
+                motion = Some(true);
+            } else if !active && prev_motion != Some(false) {
                 info!("{}: motion event ended", self.name);
-                vmd_active = false;
+                motion = Some(false);
             }
-            trace!("{}: updating signals...", self.name);
-            self.nvr.update_signals(&[self.signal_id], &[if vmd_active { 2 } else { 1 }])?;
-            trace!("{}: ...done updating signals", self.name);
+            let motion = match motion {
+                None => return Ok(()),  // if we never learned motion state, nothing to do.
+                Some(m) => m,
+            };
+            let now = Instant::now();
+            let need_update = match self.status.as_ref() {
+                None => true,
+                Some(s) => now.duration_since(s.as_of) > UPDATE_INTERVAL,
+            };
+            if need_update {
+                self.status = Some(Status {
+                    motion,
+                    as_of: now,
+                });
+                self.nvr.update_signals(&[self.signal_id], &[if motion { 2 } else { 1 }])?;
+            }
             Ok(())
         })
     }
