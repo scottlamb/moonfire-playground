@@ -110,8 +110,8 @@ fn retry_http<T>(desc: &str, mut f: impl FnMut() -> Result<T, Error>) -> Result<
     }
 }
 
-fn main() {
-    let mut h = mylog::Builder::new()
+fn init_logging() -> mylog::Handle {
+    let h = mylog::Builder::new()
         .set_format(::std::env::var("MOONFIRE_FORMAT")
                     .ok()
                     .and_then(parse_fmt)
@@ -119,6 +119,11 @@ fn main() {
         .set_spec(&::std::env::var("MOONFIRE_LOG").unwrap_or("info".to_owned()))
         .build();
     h.clone().install().unwrap();
+    h
+}
+
+fn main() {
+    let mut h = init_logging();
     let _a = h.r#async();
     let args = Docopt::new(USAGE).and_then(|d| d.parse()).unwrap_or_else(|e| e.exit());
     let cookie = args.find("--cookie")

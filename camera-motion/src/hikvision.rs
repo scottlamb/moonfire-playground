@@ -237,7 +237,7 @@ mod tests {
     static INIT: sync::Once = sync::ONCE_INIT;
 
     fn init() {
-        INIT.call_once(super::super::init_logging);
+        INIT.call_once(|| { crate::init_logging(); });
     }
 
     #[test]
