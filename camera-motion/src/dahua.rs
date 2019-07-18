@@ -113,15 +113,14 @@ impl super::Watcher for Watcher {
             }
             let e = Event::parse(::std::str::from_utf8(p.body)?)?;
             debug!("event: {:#?}", &e);
-            let prev_motion = self.status.as_ref().map(|s| s.motion);
-            let mut motion = prev_motion;
+            let mut motion = self.status.as_ref().map(|s| s.motion);
             if e.code == "VideoMotion" {
                 match e.action.as_str() {
-                    "Start" if prev_motion != Some(true) => {
+                    "Start" if motion != Some(true) => {
                         info!("{}: motion event started", self.name);
                         motion = Some(true);
                     },
-                    "Stop" if prev_motion != Some(false) => {
+                    "Stop" if motion != Some(false) => {
                         info!("{}: motion event ended", self.name);
                         motion = Some(false);
                     },
@@ -135,7 +134,7 @@ impl super::Watcher for Watcher {
             let now = Instant::now();
             let need_update = match self.status.as_ref() {
                 None => true,
-                Some(s) => now.duration_since(s.as_of) > UPDATE_INTERVAL,
+                Some(s) => s.motion != motion || now.duration_since(s.as_of) > UPDATE_INTERVAL,
             };
             if need_update {
                 self.status = Some(Status {

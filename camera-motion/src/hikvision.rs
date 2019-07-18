@@ -115,8 +115,7 @@ impl super::Watcher for Watcher {
                                   .error_for_status()?;
 
         foreach_part(&mut resp, "mixed", "", &mut |p: Part| {
-            let prev_motion = self.status.as_ref().map(|s| s.motion);
-            let mut motion = prev_motion;
+            let mut motion = self.status.as_ref().map(|s| s.motion);
             let m: mime::Mime = p.headers.get(header::CONTENT_TYPE)
                 .ok_or_else(|| format_err!("Missing part Content-Type"))?
                 .to_str()?
@@ -130,10 +129,10 @@ impl super::Watcher for Watcher {
                 _ => bail!("body {:?} must specify event type and state", p.body),
             };
             debug!("{}: notification: {} active={}", self.name, event_type, active);
-            if event_type == "VMD" && active && prev_motion != Some(true) {
+            if event_type == "VMD" && active && motion != Some(true) {
                 info!("{}: motion event started", self.name);
                 motion = Some(true);
-            } else if !active && prev_motion != Some(false) {
+            } else if !active && motion != Some(false) {
                 info!("{}: motion event ended", self.name);
                 motion = Some(false);
             }
@@ -144,7 +143,7 @@ impl super::Watcher for Watcher {
             let now = Instant::now();
             let need_update = match self.status.as_ref() {
                 None => true,
-                Some(s) => now.duration_since(s.as_of) > UPDATE_INTERVAL,
+                Some(s) => s.motion != motion || now.duration_since(s.as_of) > UPDATE_INTERVAL,
             };
             if need_update {
                 self.status = Some(Status {
