@@ -68,7 +68,7 @@ trait Watcher {
     fn watch_once(&mut self) -> Result<(), Error> ;
 }
 
-fn watch_forever(name: String, w: &mut Watcher) {
+fn watch_forever(name: String, w: &mut dyn Watcher) {
     loop {
         if let Err(e) = w.watch_once() {
             error!("{}: {}", &name, e);

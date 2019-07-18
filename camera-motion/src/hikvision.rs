@@ -234,7 +234,7 @@ mod tests {
     use std::sync;
     use super::{Notification, parse};
 
-    static INIT: sync::Once = sync::ONCE_INIT;
+    static INIT: sync::Once = sync::Once::new();
 
     fn init() {
         INIT.call_once(|| { crate::init_logging(); });

@@ -64,7 +64,7 @@ where F: FnMut(Part) -> Result<(), Error> {
     foreach_part_inner(m, r, expected_subtype, separator, f)
 }
 
-fn foreach_part_inner<F>(content_type: mime::Mime, r: &mut Read, expected_subtype: &str,
+fn foreach_part_inner<F>(content_type: mime::Mime, r: &mut dyn Read, expected_subtype: &str,
                          separator: &str, mut f: F) -> Result<(), Error>
 where F: FnMut(Part) -> Result<(), Error> {
     // Examine the headers: verify Content-Type is as expected, and determine the boundary.
@@ -116,7 +116,8 @@ where F: FnMut(Part) -> Result<(), Error> {
     Ok(())
 }
 
-fn start_part(buf: &mut Vec<u8>, boundary: &[u8], r: &mut Read) -> Result<Option<(usize, HeaderMap)>, Error> {
+fn start_part(buf: &mut Vec<u8>, boundary: &[u8], r: &mut dyn Read)
+              -> Result<Option<(usize, HeaderMap)>, Error> {
     loop {
         let boundary_len = boundary.len();
         let have_boundary = {
