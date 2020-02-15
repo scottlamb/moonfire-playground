@@ -28,23 +28,19 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-extern crate libc;
-#[macro_use] extern crate log;
-
+use log::info;
+use parking_lot::Once;
 use std::cell::{Ref, RefCell};
 use std::ffi::CStr;
 use std::fmt::{self, Write};
-use std::mem;
 use std::ptr;
-use std::sync;
 
-static START: sync::Once = sync::ONCE_INIT;
+static START: Once = Once::new();
 
 //#[link(name = "avcodec")]
 extern "C" {
     fn avcodec_version() -> libc::c_int;
     fn avcodec_alloc_context3(codec: *const AVCodec) -> *mut AVCodecContext;
-    fn avcodec_copy_context(dst: *mut AVCodecContext, src: *const AVCodecContext) -> libc::c_int;
     fn avcodec_decode_video2(ctx: *const AVCodecContext, picture: *mut AVFrame,
                              got_picture_ptr: *mut libc::c_int,
                              pkt: *const AVPacket) -> libc::c_int;
@@ -53,6 +49,8 @@ extern "C" {
     fn avcodec_free_context(ctx: *mut *mut AVCodecContext);
     fn avcodec_open2(ctx: *mut AVCodecContext, codec: *const AVCodec,
                      options: *mut *mut AVDictionary) -> libc::c_int;
+    fn avcodec_parameters_to_context(ctx: *mut AVCodecContext, par: *const AVCodecParameters)
+                                     -> libc::c_int;
     fn av_init_packet(p: *mut AVPacket);
     fn av_packet_unref(p: *mut AVPacket);
 }
@@ -61,17 +59,17 @@ extern "C" {
 extern "C" {
     fn avformat_version() -> libc::c_int;
 
-    fn avformat_alloc_output_context2(ctx: *mut *mut AVFormatContext, oformat: *mut AVOutputFormat,
-                                      format_name: *const libc::c_char,
-                                      filename: *const libc::c_char) -> libc::c_int;
+    //fn avformat_alloc_output_context2(ctx: *mut *mut AVFormatContext, oformat: *mut AVOutputFormat,
+    //                                  format_name: *const libc::c_char,
+    //                                  filename: *const libc::c_char) -> libc::c_int;
     fn avformat_open_input(ctx: *mut *mut AVFormatContext, url: *const libc::c_char,
                            fmt: *const AVInputFormat, options: *mut *mut AVDictionary)
                            -> libc::c_int;
     fn avformat_close_input(ctx: *mut *mut AVFormatContext);
     fn avformat_find_stream_info(ctx: *mut AVFormatContext, options: *mut *mut AVDictionary)
                                  -> libc::c_int;
-    fn avformat_new_stream(s: *mut AVFormatContext, c: *const AVCodec) -> *mut AVStream;
-    fn avformat_write_header(c: *mut AVFormatContext, opts: *mut *mut AVDictionary) -> libc::c_int;
+    //fn avformat_new_stream(s: *mut AVFormatContext, c: *const AVCodec) -> *mut AVStream;
+    //fn avformat_write_header(c: *mut AVFormatContext, opts: *mut *mut AVDictionary) -> libc::c_int;
     fn av_read_frame(ctx: *mut AVFormatContext, p: *mut AVPacket) -> libc::c_int;
     fn av_register_all();
     fn avformat_network_init() -> libc::c_int;
@@ -101,7 +99,7 @@ extern "C" {
     static moonfire_ffmpeg_compiled_libavformat_version: libc::c_int;
     static moonfire_ffmpeg_compiled_libavutil_version: libc::c_int;
     static moonfire_ffmpeg_av_dict_ignore_suffix: libc::c_int;
-    static moonfire_ffmpeg_av_nopts_value: libc::int64_t;
+    static moonfire_ffmpeg_av_nopts_value: i64;
 
     static moonfire_ffmpeg_av_codec_id_h264: libc::c_int;
     static moonfire_ffmpeg_avmedia_type_video: libc::c_int;
@@ -112,6 +110,13 @@ extern "C" {
     static moonfire_ffmpeg_averror_unknown: libc::c_int;
 
     fn moonfire_ffmpeg_init();
+
+    // avcodec
+    fn moonfire_ffmpeg_codecpar_codec_id(ctx: *const AVCodecParameters) -> libc::c_int;
+    fn moonfire_ffmpeg_codecpar_codec_type(ctx: *const AVCodecParameters) -> libc::c_int;
+    fn moonfire_ffmpeg_codecpar_extradata(ctx: *const AVCodecParameters) -> DataLen;
+    fn moonfire_ffmpeg_codecpar_height(ctx: *const AVCodecParameters) -> libc::c_int;
+    fn moonfire_ffmpeg_codecpar_width(ctx: *const AVCodecParameters) -> libc::c_int;
 
     fn moonfire_ffmpeg_cctx_codec_id(ctx: *const AVCodecContext) -> libc::c_int;
     fn moonfire_ffmpeg_cctx_codec_type(ctx: *const AVCodecContext) -> libc::c_int;
@@ -130,22 +135,21 @@ extern "C" {
     fn moonfire_ffmpeg_packet_alloc() -> *mut AVPacket;
     fn moonfire_ffmpeg_packet_free(p: *mut AVPacket);
     fn moonfire_ffmpeg_packet_is_key(p: *const AVPacket) -> bool;
-    fn moonfire_ffmpeg_packet_pts(p: *const AVPacket) -> libc::int64_t;
-    fn moonfire_ffmpeg_packet_dts(p: *const AVPacket) -> libc::int64_t;
+    fn moonfire_ffmpeg_packet_pts(p: *const AVPacket) -> i64;
+    fn moonfire_ffmpeg_packet_dts(p: *const AVPacket) -> i64;
     fn moonfire_ffmpeg_packet_duration(p: *const AVPacket) -> libc::c_int;
-    fn moonfire_ffmpeg_packet_set_pts(p: *mut AVPacket, pts: libc::int64_t);
-    fn moonfire_ffmpeg_packet_set_dts(p: *mut AVPacket, dts: libc::int64_t);
+    fn moonfire_ffmpeg_packet_set_pts(p: *mut AVPacket, pts: i64);
+    fn moonfire_ffmpeg_packet_set_dts(p: *mut AVPacket, dts: i64);
     fn moonfire_ffmpeg_packet_set_duration(p: *mut AVPacket, dur: libc::c_int);
     fn moonfire_ffmpeg_packet_data(p: *const AVPacket) -> DataLen;
     fn moonfire_ffmpeg_packet_stream_index(p: *const AVPacket) -> libc::c_uint;
 
     // avformat
     fn moonfire_ffmpeg_fctx_streams(ctx: *const AVFormatContext) -> StreamsLen;
-    fn moonfire_ffmpeg_fctx_open_write(ctx: *mut AVFormatContext,
-                                       url: *const libc::c_char) -> libc::c_int;
+    //fn moonfire_ffmpeg_fctx_open_write(ctx: *mut AVFormatContext,
+    //                                   url: *const libc::c_char) -> libc::c_int;
 
-    fn moonfire_ffmpeg_stream_codec(stream: *const AVStream) -> *const AVCodecContext;
-    fn moonfire_ffmpeg_stream_codec_mut(stream: *mut AVStream) -> *mut AVCodecContext;
+    fn moonfire_ffmpeg_stream_codecpar(stream: *const AVStream) -> *const AVCodecParameters;
     fn moonfire_ffmpeg_stream_time_base(stream: *const AVStream) -> AVRational;
 }
 
@@ -169,11 +173,11 @@ pub struct AVRational {
 // No ABI stability assumption here; use heap allocation/deallocation and accessors only.
 enum AVCodec {}
 pub enum AVCodecContext {}
+pub enum AVCodecParameters {}
 enum AVDictionary {}
 enum AVFormatContext {}
 pub enum AVFrame {}
 enum AVInputFormat {}
-enum AVOutputFormat {}
 enum AVPacket {}
 enum AVStream {}
 
@@ -190,9 +194,11 @@ impl AVCodecContext {
         MediaType(unsafe { moonfire_ffmpeg_cctx_codec_type(self) })
     }
     pub fn params(&self) -> VideoParameters {
-        let mut p = unsafe { mem::uninitialized() };
-        unsafe { moonfire_ffmpeg_cctx_params(self, &mut p) };
-        p
+        let mut p = std::mem::MaybeUninit::uninit();
+        unsafe {
+            moonfire_ffmpeg_cctx_params(self, p.as_mut_ptr());
+            p.assume_init()
+        }
     }
 }
 
@@ -249,49 +255,8 @@ impl InputFormatContext {
 
 unsafe impl Send for InputFormatContext {}
 
-pub struct OutputFormatContext(*mut AVFormatContext);
-
-impl OutputFormatContext {
-    pub fn new(format_name: Option<&CStr>, filename: &CStr) -> Result<Self, Error> {
-        let mut ctx = ptr::null_mut();
-        Error::wrap(unsafe {
-            avformat_alloc_output_context2(
-                &mut ctx, ptr::null_mut(), format_name.map_or(ptr::null(), |f| f.as_ptr()),
-                filename.as_ptr())
-        })?;
-        Ok(OutputFormatContext(ctx))
-    }
-
-    pub fn open(&mut self, url: &CStr) -> Result<(), Error> {
-        Error::wrap(unsafe { moonfire_ffmpeg_fctx_open_write(self.0, url.as_ptr()) })?;
-        Ok(())
-    }
-
-    pub fn write_header(&mut self) -> Result<(), Error> {
-        let mut opts = Dictionary::new();
-        Error::wrap(unsafe { avformat_write_header(self.0, &mut opts.0) })?;
-        Ok(())
-    }
-
-    pub fn add_stream<'s>(&'s mut self, encoder: Encoder) -> Result<OutputStream<'s>, Error> {
-        match unsafe { avformat_new_stream(self.0, encoder.0).as_mut() } {
-            None => Err(Error::unknown()),
-            Some(r) => Ok(OutputStream(r)),
-        }
-    }
-}
-
-pub struct OutputStream<'o>(&'o mut AVStream);
-
-impl<'o> OutputStream<'o> {
-    pub fn codec(&mut self) -> EncodeContext {
-        EncodeContext(unsafe { moonfire_ffmpeg_stream_codec_mut(self.0).as_mut() }.unwrap())
-    }
-}
-
 impl Drop for InputFormatContext {
     fn drop(&mut self) {
-        println!("drop InputFormatContext");
         unsafe {
             moonfire_ffmpeg_packet_free(*self.pkt.borrow());
             avformat_close_input(&mut self.ctx);
@@ -379,11 +344,28 @@ impl<'owner> Streams<'owner> {
     pub fn len(&self) -> usize { self.0.len() }
 }
 
+impl AVCodecParameters {
+    pub fn extradata(&self) -> &[u8] {
+        unsafe {
+            let d = moonfire_ffmpeg_codecpar_extradata(self);
+            ::std::slice::from_raw_parts(d.data, d.len)
+        }
+    }
+    pub fn width(&self) -> libc::c_int { unsafe { moonfire_ffmpeg_codecpar_width(self) } }
+    pub fn height(&self) -> libc::c_int { unsafe { moonfire_ffmpeg_codecpar_height(self) } }
+    pub fn codec_id(&self) -> CodecId {
+        CodecId(unsafe { moonfire_ffmpeg_codecpar_codec_id(self) })
+    }
+    pub fn codec_type(&self) -> MediaType {
+        MediaType(unsafe { moonfire_ffmpeg_codecpar_codec_type(self) })
+    }
+}
+
 pub struct InputStream<'o>(&'o AVStream);
 
 impl<'o> InputStream<'o> {
-    pub fn codec<'s>(&'s self) -> InputCodecContext<'s> {
-        InputCodecContext(unsafe { moonfire_ffmpeg_stream_codec(self.0).as_ref() }.unwrap())
+    pub fn codecpar<'s>(&'s self) -> InputCodecParameters<'s> {
+        InputCodecParameters(unsafe { moonfire_ffmpeg_stream_codecpar(self.0).as_ref() }.unwrap())
     }
 
     pub fn time_base(&self) -> AVRational {
@@ -391,15 +373,15 @@ impl<'o> InputStream<'o> {
     }
 }
 
-pub struct InputCodecContext<'s>(&'s AVCodecContext);
+pub struct InputCodecParameters<'s>(&'s AVCodecParameters);
 
-impl<'s> InputCodecContext<'s> {
-    pub fn extradata(&self) -> &[u8] {
+impl<'s> InputCodecParameters<'s> {
+    /*pub fn extradata(&self) -> &[u8] {
         unsafe {
             let d = moonfire_ffmpeg_cctx_extradata(self.0);
             ::std::slice::from_raw_parts(d.data, d.len)
         }
-    }
+    }*/
 
     pub fn new_decoder(&self, options: &mut Dictionary) -> Result<DecodeContext, Error> {
         let decoder = match self.codec_id().find_decoder() {
@@ -407,15 +389,15 @@ impl<'s> InputCodecContext<'s> {
             None => { return Err(Error::decoder_not_found()); },
         };
         let mut c = decoder.alloc_context()?;
-        Error::wrap(unsafe { avcodec_copy_context(c.ctx, self.0) })?;
+        Error::wrap(unsafe { avcodec_parameters_to_context(c.ctx.as_ptr(), self.0) })?;
         c.open(options)?;
         Ok(c)
     }
 }
 
-impl<'s> std::ops::Deref for InputCodecContext<'s> {
-    type Target = AVCodecContext;
-    fn deref(&self) -> &AVCodecContext { &self.0 }
+impl<'s> std::ops::Deref for InputCodecParameters<'s> {
+    type Target = AVCodecParameters;
+    fn deref(&self) -> &AVCodecParameters { self.0 }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -440,10 +422,8 @@ pub struct Decoder(&'static AVCodec);
 
 impl Decoder {
     fn alloc_context(self) -> Result<DecodeContext, Error> {
-        let ctx = unsafe { avcodec_alloc_context3(self.0) };
-        if ctx.is_null() {
-            return Err(Error::enomem());
-        }
+        let ctx = ptr::NonNull::new(unsafe { avcodec_alloc_context3(self.0) })
+            .ok_or(Error::enomem())?;
         Ok(DecodeContext {
             decoder: self,
             ctx,
@@ -453,25 +433,28 @@ impl Decoder {
 
 pub struct DecodeContext {
     decoder: Decoder,
-    ctx: *mut AVCodecContext,
+    ctx: ptr::NonNull<AVCodecContext>,
 }
 
 impl Drop for DecodeContext {
     fn drop(&mut self) {
-        unsafe { avcodec_free_context(&mut self.ctx) }
+        let mut ctx = self.ctx.as_ptr();
+        unsafe { avcodec_free_context(&mut ctx) }
     }
 }
 
 impl DecodeContext {
     fn open(&mut self, options: &mut Dictionary) -> Result<(), Error> {
-        Error::wrap(unsafe { avcodec_open2(self.ctx, self.decoder.0, &mut options.0) })?;
+        Error::wrap(unsafe { avcodec_open2(self.ctx.as_mut(), self.decoder.0, &mut options.0) })?;
         Ok(())
     }
+
+    pub fn ctx(&self) -> &AVCodecContext { unsafe { self.ctx.as_ref() } }
 
     pub fn decode_video(&self, pkt: &Packet, picture: &mut Frame) -> Result<bool, Error> {
         let mut got_picture: libc::c_int = 0;
         Error::wrap(unsafe {
-            avcodec_decode_video2(self.ctx, picture.frame, &mut got_picture, *pkt.0)
+            avcodec_decode_video2(self.ctx.as_ptr(), picture.frame, &mut got_picture, *pkt.0)
         })?;
         if got_picture != 0 {
             unsafe { moonfire_ffmpeg_frame_stuff(picture.frame, &mut picture.stuff) };
@@ -669,13 +652,12 @@ impl Error {
     pub fn is_eof(self) -> bool { return self.0 == unsafe { moonfire_ffmpeg_averror_eof } }
 }
 
-impl std::error::Error for Error {
-    fn description(&self) -> &str {
-        // TODO: pull out some common cases.
-        "ffmpeg error"
-    }
+impl std::error::Error for Error {}
 
-    fn cause(&self) -> Option<&std::error::Error> { None }
+impl fmt::Debug for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Error({} /* {} */)", self.0, self)
+    }
 }
 
 impl fmt::Display for Error {
@@ -689,10 +671,6 @@ impl fmt::Display for Error {
         };
         f.write_str(&s.to_string_lossy())
     }
-}
-
-impl fmt::Debug for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { fmt::Display::fmt(self, f) }
 }
 
 #[derive(Copy, Clone)]
@@ -773,10 +751,7 @@ impl fmt::Display for Dictionary {
 }
 
 impl Drop for Dictionary {
-    fn drop(&mut self) {
-        println!("drop Dictionary");
-        unsafe { av_dict_free(&mut self.0) }
-    }
+    fn drop(&mut self) { unsafe { av_dict_free(&mut self.0) } }
 }
 
 impl Ffmpeg {
@@ -847,7 +822,9 @@ mod tests {
     #[test]
     fn test_error() {
         let eof_formatted = format!("{}", Error::eof());
-        assert!(eof_formatted.contains("End of file"), "eof is: {}", eof_formatted);
+        assert!(eof_formatted.contains("End of file"), "eof formatted is: {}", eof_formatted);
+        let eof_debug = format!("{:?}", Error::eof());
+        assert!(eof_debug.contains("End of file"), "eof debug is: {}", eof_debug);
 
         // Errors should be round trippable to a CString. (This will fail if they contain NUL
         // bytes.)

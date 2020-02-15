@@ -57,6 +57,20 @@ const int moonfire_ffmpeg_averror_eof = AVERROR_EOF;
 const int moonfire_ffmpeg_averror_enomem = AVERROR(ENOMEM);
 const int moonfire_ffmpeg_averror_unknown = AVERROR_UNKNOWN;
 
+// Prior to libavcodec 58.9.100, multithreaded callers were expected to supply
+// a lock callback. That release deprecated this API. It also introduced a
+// FF_API_LOCKMGR #define to track its removal:
+//
+// * older builds (in which the lock callback is needed) don't define it.
+// * middle builds (in which the callback is deprecated) define it as 1.
+//   value of 1.
+// * future builds (in which the callback removed) will define
+//   it as 0.
+//
+// so (counterintuitively) use the lock manager when FF_API_LOCKMGR is
+// undefined.
+
+#ifndef FF_API_LOCKMGR
 static int lock_callback(void **mutex, enum AVLockOp op) {
     switch (op) {
         case AV_LOCK_CREATE:
@@ -85,11 +99,14 @@ static int lock_callback(void **mutex, enum AVLockOp op) {
     }
     return 0;
 }
+#endif
 
 void moonfire_ffmpeg_init(void) {
+#ifndef FF_API_LOCKMGR
     if (av_lockmgr_register(&lock_callback) < 0) {
         abort();
     }
+#endif
 }
 
 struct moonfire_ffmpeg_streams {
@@ -158,8 +175,7 @@ struct moonfire_ffmpeg_data moonfire_ffmpeg_packet_data(AVPacket *pkt) {
     return d;
 }
 
-const AVCodecContext *moonfire_ffmpeg_stream_codec(const AVStream *stream) { return stream->codec; }
-AVCodecContext *moonfire_ffmpeg_stream_codec_mut(AVStream *stream) { return stream->codec; }
+AVCodecParameters *moonfire_ffmpeg_stream_codecpar(AVStream *stream) { return stream->codecpar; }
 AVRational moonfire_ffmpeg_stream_time_base(AVStream *stream) { return stream->time_base; }
 
 int moonfire_ffmpeg_cctx_codec_id(AVCodecContext *cctx) { return cctx->codec_id; }
@@ -183,3 +199,14 @@ void moonfire_ffmpeg_frame_stuff(AVFrame *frame,
     s->width = frame->width;
     s->height = frame->height;
 }
+
+int moonfire_ffmpeg_codecpar_codec_id(AVCodecParameters *codecpar) { return codecpar->codec_id; }
+int moonfire_ffmpeg_codecpar_codec_type(AVCodecParameters *codecpar) {
+    return codecpar->codec_type;
+}
+struct moonfire_ffmpeg_data moonfire_ffmpeg_codecpar_extradata(AVCodecParameters *codecpar) {
+    struct moonfire_ffmpeg_data d = {codecpar->extradata, codecpar->extradata_size};
+    return d;
+}
+int moonfire_ffmpeg_codecpar_height(AVCodecParameters *codecpar) { return codecpar->height; }
+int moonfire_ffmpeg_codecpar_width(AVCodecParameters *codecpar) { return codecpar->width; }

@@ -2,7 +2,9 @@
 name = "moonfire-motion"
 version = "0.1.0"
 authors = ["Scott Lamb <slamb@slamb.org>"]
+edition = "2018"
 
 [dependencies]
+cstr = "0.1.7"
 #ffmpeg = { git = "https://github.com/meh/rust-ffmpeg" }
 moonfire-ffmpeg = { path = "ffmpeg" }

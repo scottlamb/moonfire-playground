@@ -28,14 +28,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-extern crate cc;
-extern crate pkg_config;
-
 fn main() {
     let libraries = [
         pkg_config::Config::new().atleast_version("54.1").probe("libavutil").unwrap(),
         pkg_config::Config::new().atleast_version("56.0").probe("libavcodec").unwrap(),
-        pkg_config::Config::new().atleast_version("56.0").probe("libavformat").unwrap(),
+        pkg_config::Config::new().atleast_version("57.5").probe("libavformat").unwrap(),
     ];
     let mut wrapper = cc::Build::new();
 
