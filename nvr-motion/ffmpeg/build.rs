@@ -33,6 +33,7 @@ fn main() {
         pkg_config::Config::new().atleast_version("54.1").probe("libavutil").unwrap(),
         pkg_config::Config::new().atleast_version("56.0").probe("libavcodec").unwrap(),
         pkg_config::Config::new().atleast_version("57.5").probe("libavformat").unwrap(),
+        pkg_config::Config::new().atleast_version("4.0").probe("libswscale").unwrap(),
     ];
     let mut wrapper = cc::Build::new();
 

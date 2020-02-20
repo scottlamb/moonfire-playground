@@ -1,8 +1,6 @@
 extern crate moonfire_ffmpeg;
 extern crate moonfire_motion;
 
-use moonfire_motion::{Processor, MotionProcessor};
-
 //use cstr::*;
 use std::env;
 use std::ffi::CString;
@@ -21,31 +19,35 @@ fn main() {
     const VIDEO_STREAM: usize = 0;
 
     let s = input.streams().get(VIDEO_STREAM);
-    let cp = s.codecpar();
+    let par = s.codecpar();
     let mut dopt = moonfire_ffmpeg::Dictionary::new();
     //dopt.set(cstr!("refcounted_frames"), cstr!("0")).unwrap();  // TODO?
-    let d = cp.new_decoder(&mut dopt).unwrap();
+    let d = par.new_decoder(&mut dopt).unwrap();
     //println!("pixel format: {}", d.pix_fmt());
-    //let img = moonfire_ffmpeg::Image::new(c.width(), c.height(), c.pix_fmt(), 1).unwrap();
-    let mut f = moonfire_ffmpeg::Frame::new().unwrap();
-    let mut p: Option<MotionProcessor> = None;
+
+    // TODO: get proper dimensions and pix_fmt from TensorFlow model.
+    let mut scaled = moonfire_ffmpeg::VideoFrame::owned(moonfire_ffmpeg::ImageDimensions {
+        width: 300,
+        height: 300,
+        pix_fmt: par.dims().pix_fmt,
+    }).unwrap();
+    let mut f = moonfire_ffmpeg::VideoFrame::empty().unwrap();
+    let mut s = moonfire_ffmpeg::Scaler::new(par.dims(), scaled.dims()).unwrap();
+    let mut frame_num = 0;
     loop {
         let pkt = match input.read_frame() {
             Ok(p) => p,
             Err(e) if e.is_eof() => { break; },
             Err(e) => panic!(e),
         };
-        println!("packet, stream {}", pkt.stream_index());
         if pkt.stream_index() != VIDEO_STREAM {
             continue;
         }
         if !d.decode_video(&pkt, &mut f).unwrap() {
             continue;
         }
-        println!("frame");
-        p = Some(match p {
-            None => MotionProcessor::new(&f),
-            Some(mut p) => { p.process(&f).unwrap(); p },
-        });
+        frame_num += 1;
+        println!("frame {}", frame_num);
+        s.scale(&f, &mut scaled);
     }
 }

@@ -87,10 +87,21 @@ extern "C" {
     fn av_dict_free(d: *mut *mut AVDictionary);
     fn av_frame_alloc() -> *mut AVFrame;
     fn av_frame_free(f: *mut *mut AVFrame);
-    fn av_freep(ptr: *mut libc::c_void);
-    fn av_image_alloc(pointers: *mut *mut u8, linesizes: *mut libc::c_int, w: libc::c_int,
-                      h: libc::c_int, pix_fmt: libc::c_int, align: libc::c_int) -> libc::c_int;
     fn av_get_pix_fmt_name(fmt: libc::c_int) -> *const libc::c_char;
+}
+
+//#[link(name = "swscale")]
+extern "C" {
+    fn swscale_version() -> libc::c_int;
+
+    fn sws_getContext(src_w: libc::c_int, src_h: libc::c_int, src_fmt: libc::c_int,
+                      dst_w: libc::c_int, dst_h: libc::c_int, dst_fmt: libc::c_int,
+                      flags: libc::c_int, src_filter: *mut SwsFilter,
+                      dst_filter: *mut SwsFilter, param: *const libc::c_double) -> *mut SwsContext;
+    fn sws_freeContext(ctx: *mut SwsContext);
+    fn sws_scale(c: *mut SwsContext, src_slice: *const *const u8, src_stride: *const libc::c_int,
+                 src_slice_y: libc::c_int, src_slice_h: libc::c_int,
+                 dst_slice: *const *mut u8, dst_stride: *const libc::c_int);
 }
 
 //#[link(name = "wrapper")]
@@ -98,6 +109,7 @@ extern "C" {
     static moonfire_ffmpeg_compiled_libavcodec_version: libc::c_int;
     static moonfire_ffmpeg_compiled_libavformat_version: libc::c_int;
     static moonfire_ffmpeg_compiled_libavutil_version: libc::c_int;
+    static moonfire_ffmpeg_compiled_libswscale_version: libc::c_int;
     static moonfire_ffmpeg_av_dict_ignore_suffix: libc::c_int;
     static moonfire_ffmpeg_av_nopts_value: i64;
 
@@ -109,14 +121,15 @@ extern "C" {
     static moonfire_ffmpeg_averror_decoder_not_found: libc::c_int;
     static moonfire_ffmpeg_averror_unknown: libc::c_int;
 
+    static moonfire_ffmpeg_sws_bilinear: libc::c_int;
+
     fn moonfire_ffmpeg_init();
 
     // avcodec
     fn moonfire_ffmpeg_codecpar_codec_id(ctx: *const AVCodecParameters) -> libc::c_int;
     fn moonfire_ffmpeg_codecpar_codec_type(ctx: *const AVCodecParameters) -> libc::c_int;
+    fn moonfire_ffmpeg_codecpar_dims(ctx: *const AVCodecParameters) -> ImageDimensions;
     fn moonfire_ffmpeg_codecpar_extradata(ctx: *const AVCodecParameters) -> DataLen;
-    fn moonfire_ffmpeg_codecpar_height(ctx: *const AVCodecParameters) -> libc::c_int;
-    fn moonfire_ffmpeg_codecpar_width(ctx: *const AVCodecParameters) -> libc::c_int;
 
     fn moonfire_ffmpeg_cctx_codec_id(ctx: *const AVCodecContext) -> libc::c_int;
     fn moonfire_ffmpeg_cctx_codec_type(ctx: *const AVCodecContext) -> libc::c_int;
@@ -127,9 +140,6 @@ extern "C" {
     fn moonfire_ffmpeg_cctx_params(ctx: *const AVCodecContext, p: *mut VideoParameters);
     fn moonfire_ffmpeg_cctx_set_params(ctx: *mut AVCodecContext, p: *const VideoParameters);
 
-    fn moonfire_ffmpeg_frame_pix_fmt(frame: *const AVFrame) -> libc::c_int;
-    fn moonfire_ffmpeg_frame_height(frame: *const AVFrame) -> libc::c_int;
-    fn moonfire_ffmpeg_frame_width(frame: *const AVFrame) -> libc::c_int;
     fn moonfire_ffmpeg_frame_stuff(frame: *const AVFrame, stuff: *mut FrameStuff);
 
     fn moonfire_ffmpeg_packet_alloc() -> *mut AVPacket;
@@ -151,6 +161,10 @@ extern "C" {
 
     fn moonfire_ffmpeg_stream_codecpar(stream: *const AVStream) -> *const AVCodecParameters;
     fn moonfire_ffmpeg_stream_time_base(stream: *const AVStream) -> AVRational;
+
+    // avutil
+    fn moonfire_ffmpeg_frame_image_alloc(f: *mut AVFrame, dims: *const ImageDimensions)
+                                         -> libc::c_int;
 }
 
 pub struct Ffmpeg {}
@@ -180,6 +194,8 @@ pub enum AVFrame {}
 enum AVInputFormat {}
 enum AVPacket {}
 enum AVStream {}
+enum SwsContext {}
+enum SwsFilter {}
 
 impl AVCodecContext {
     pub fn width(&self) -> libc::c_int { unsafe { moonfire_ffmpeg_cctx_width(self) } }
@@ -199,14 +215,6 @@ impl AVCodecContext {
             moonfire_ffmpeg_cctx_params(self, p.as_mut_ptr());
             p.assume_init()
         }
-    }
-}
-
-impl AVFrame {
-    pub fn width(&self) -> libc::c_int { unsafe { moonfire_ffmpeg_frame_width(self) } }
-    pub fn height(&self) -> libc::c_int { unsafe { moonfire_ffmpeg_frame_height(self) } }
-    pub fn pix_fmt(&self) -> PixelFormat {
-        PixelFormat(unsafe { moonfire_ffmpeg_frame_pix_fmt(self) })
     }
 }
 
@@ -273,11 +281,9 @@ struct DataLen {
 
 #[repr(C)]
 struct FrameStuff {
-    data: *const *const u8,
+    dims: ImageDimensions,
+    data: *const *mut u8,
     linesizes: *const libc::c_int,
-    format: libc::c_int,
-    width: libc::c_int,
-    height: libc::c_int,
 }
 
 // matches moonfire_ffmpeg_streams_len
@@ -351,8 +357,10 @@ impl AVCodecParameters {
             ::std::slice::from_raw_parts(d.data, d.len)
         }
     }
-    pub fn width(&self) -> libc::c_int { unsafe { moonfire_ffmpeg_codecpar_width(self) } }
-    pub fn height(&self) -> libc::c_int { unsafe { moonfire_ffmpeg_codecpar_height(self) } }
+    pub fn dims(&self) -> ImageDimensions {
+        assert!(self.codec_type().is_video());
+        unsafe { moonfire_ffmpeg_codecpar_dims(self) }
+    }
     pub fn codec_id(&self) -> CodecId {
         CodecId(unsafe { moonfire_ffmpeg_codecpar_codec_id(self) })
     }
@@ -423,7 +431,7 @@ pub struct Decoder(&'static AVCodec);
 impl Decoder {
     fn alloc_context(self) -> Result<DecodeContext, Error> {
         let ctx = ptr::NonNull::new(unsafe { avcodec_alloc_context3(self.0) })
-            .ok_or(Error::enomem())?;
+            .ok_or_else(Error::enomem)?;
         Ok(DecodeContext {
             decoder: self,
             ctx,
@@ -451,13 +459,13 @@ impl DecodeContext {
 
     pub fn ctx(&self) -> &AVCodecContext { unsafe { self.ctx.as_ref() } }
 
-    pub fn decode_video(&self, pkt: &Packet, picture: &mut Frame) -> Result<bool, Error> {
+    pub fn decode_video(&self, pkt: &Packet, frame: &mut VideoFrame) -> Result<bool, Error> {
         let mut got_picture: libc::c_int = 0;
         Error::wrap(unsafe {
-            avcodec_decode_video2(self.ctx.as_ptr(), picture.frame, &mut got_picture, *pkt.0)
+            avcodec_decode_video2(self.ctx.as_ptr(), frame.frame.as_mut(), &mut got_picture, *pkt.0)
         })?;
         if got_picture != 0 {
-            unsafe { moonfire_ffmpeg_frame_stuff(picture.frame, &mut picture.stuff) };
+            unsafe { moonfire_ffmpeg_frame_stuff(frame.frame.as_ptr(), &mut frame.stuff) };
             return Ok(true);
         };
         Ok(false)
@@ -516,8 +524,8 @@ impl MediaType {
     pub fn is_video(self) -> bool { self.0 == unsafe { moonfire_ffmpeg_avmedia_type_video } }
 }
 
-pub struct Frame {
-    frame: *mut AVFrame,
+pub struct VideoFrame {
+    frame: ptr::NonNull<AVFrame>,
     stuff: FrameStuff,
 }
 
@@ -528,22 +536,32 @@ pub struct Plane<'f> {
     pub height: usize,
 }
 
-impl Frame {
-    pub fn new() -> Result<Frame, Error> {
-        let frame = unsafe { av_frame_alloc() };
-        if frame.is_null() {
-            return Err(Error::enomem());
-        }
-        Ok(Frame {
+impl VideoFrame {
+    /// Creates a new `VideoFrame` which is empty: no allocated storage (reference-counted or
+    /// otherwise). Can be filled via `DecodeContexst::decode_video`.
+    pub fn empty() -> Result<Self, Error> {
+        let frame = ptr::NonNull::new(unsafe { av_frame_alloc() }).ok_or_else(Error::enomem)?;
+        Ok(VideoFrame {
             frame,
             stuff: FrameStuff {
+                dims: ImageDimensions {
+                    width: 0,
+                    height: 0,
+                    pix_fmt: PixelFormat(-1),
+                },
                 data: ptr::null(),
                 linesizes: ptr::null(),
-                format: 0,
-                width: 0,
-                height: 0,
             },
         })
+    }
+
+    /// Creates a new `VideoFrame` with an owned (not reference-counted) buffer of the specified
+    /// dimensions.
+    pub fn owned(dims: ImageDimensions) -> Result<Self, Error> {
+        let mut frame = VideoFrame::empty()?;
+        Error::wrap(unsafe { moonfire_ffmpeg_frame_image_alloc(frame.frame.as_mut(), &dims) })?;
+        unsafe { moonfire_ffmpeg_frame_stuff(frame.frame.as_ptr(), &mut frame.stuff) };
+        Ok(frame)
     }
 
     pub fn plane(&self, plane: usize) -> Plane {
@@ -553,10 +571,8 @@ impl Frame {
         assert!(!d.is_null());
         assert!(l > 0);
         let l = l as usize;
-        assert!(self.stuff.width > 0);
-        assert!(self.stuff.height > 0);
-        let width = self.stuff.width as usize;
-        let height = self.stuff.height as usize;
+        let width = self.stuff.dims.width as usize;
+        let height = self.stuff.dims.height as usize;
         Plane {
             data: unsafe { std::slice::from_raw_parts(d, l * height) } ,
             linesize: l,
@@ -564,31 +580,29 @@ impl Frame {
             height,
         }
     }
+
+    pub fn dims(&self) -> ImageDimensions { self.stuff.dims }
 }
 
-impl std::ops::Deref for Frame {
-    type Target = AVFrame;
-    fn deref(&self) -> &AVFrame { unsafe { self.frame.as_ref().unwrap() } }
-}
-
-impl Drop for Frame {
+impl Drop for VideoFrame {
     fn drop(&mut self) {
-        println!("drop Frame");
-        unsafe { av_frame_free(&mut self.frame) }
+        unsafe {
+            let mut f = self.frame.as_ptr();
+            av_frame_free(&mut f);
+            // This leaves self.frame dangling, but it's being dropped.
+        }
     }
 }
 
-pub struct Image {
-    pointers: [*mut u8; 4],
-    linesizes: [libc::c_int; 4],
-    pub w: libc::c_int,
-    pub h: libc::c_int,
-    pub pix_fmt: PixelFormat,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-#[repr(C)]
+#[derive(Copy, Clone, PartialEq, Eq)]
+#[repr(transparent)]
 pub struct PixelFormat(libc::c_int);
+
+impl fmt::Debug for PixelFormat {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "PixelFormat({} /* {} */)", self.0, self)
+    }
+}
 
 impl fmt::Display for PixelFormat {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -603,32 +617,57 @@ impl fmt::Display for PixelFormat {
     }
 }
 
-impl Image {
-    pub fn new(w: libc::c_int, h: libc::c_int, pix_fmt: PixelFormat, align: libc::c_int)
-               -> Result<Image, Error> {
-        let mut i = Image {
-            pointers: [ptr::null_mut(); 4],
-            linesizes: [0; 4],
-            w,
-            h,
-            pix_fmt,
-        };
-        println!("Image::new, w:{} h:{}, pix_fmt:{}, align:{}", w, h, pix_fmt.0, align);
-        let r = unsafe { av_image_alloc(i.pointers.as_mut_ptr(), i.linesizes.as_mut_ptr(), w, h,
-                                        pix_fmt.0, align)};
-        if r < 0 {
-            return Err(Error(r));
-        }
-        Ok(i)
+// Must match moonfire_ffmpeg_image_dimensions.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct ImageDimensions {
+    pub width: libc::c_int,
+    pub height: libc::c_int,
+    pub pix_fmt: PixelFormat,
+}
+
+impl fmt::Display for ImageDimensions {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}x{}/{}", self.width, self.height, self.pix_fmt)
     }
 }
 
-impl Drop for Image {
-    fn drop(&mut self) {
-        println!("drop Image");
-        // TODO: another level of indirection?
-        unsafe { av_freep(std::mem::transmute(self.pointers.as_mut_ptr())) };
+pub struct Scaler {
+    ctx: ptr::NonNull<SwsContext>,
+    src: ImageDimensions,
+    dst: ImageDimensions,
+}
+
+impl Scaler {
+    pub fn new(src: ImageDimensions, dst: ImageDimensions) -> Result<Self, Error> {
+        // TODO: yuvj420p causes an annoying warning "deprecated pixel format used, make sure you
+        // did set range correctly" here. Looks like we need to change to yuv420p and call
+        // sws_setColorspaceDetails to get the same effect while suppressing this warning.
+        println!("scaler for {} -> {}", src, dst);
+        let ctx = ptr::NonNull::new(unsafe {
+            sws_getContext(src.width, src.height, src.pix_fmt.0, dst.width, dst.height,
+                           dst.pix_fmt.0, moonfire_ffmpeg_sws_bilinear, ptr::null_mut(),
+                           ptr::null_mut(), ptr::null())
+        }).ok_or_else(Error::unknown)?;
+        Ok(Scaler {
+            ctx,
+            src,
+            dst,
+        })
     }
+
+    pub fn scale(&mut self, src: &VideoFrame, dst: &mut VideoFrame) {
+        assert_eq!(src.dims(), self.src);
+        assert_eq!(dst.dims(), self.dst);
+        unsafe {
+            sws_scale(self.ctx.as_ptr(), src.stuff.data.cast(),
+                      src.stuff.linesizes, 0, self.src.height, dst.stuff.data, dst.stuff.linesizes)
+        };
+    }
+}
+
+impl Drop for Scaler {
+    fn drop(&mut self) { unsafe { sws_freeContext(self.ctx.as_ptr()) } }
 }
 
 #[derive(Copy, Clone)]
@@ -764,6 +803,8 @@ impl Ffmpeg {
                              avcodec_version()),
                 Library::new("avformat", moonfire_ffmpeg_compiled_libavformat_version,
                              avformat_version()),
+                Library::new("swscale", moonfire_ffmpeg_compiled_libswscale_version,
+                             swscale_version()),
             ];
             let mut msg = String::new();
             let mut compatible = true;

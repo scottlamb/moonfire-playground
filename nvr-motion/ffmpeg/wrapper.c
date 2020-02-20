@@ -35,7 +35,10 @@
 #include <libavformat/version.h>
 #include <libavutil/avutil.h>
 #include <libavutil/dict.h>
+#include <libavutil/imgutils.h>
 #include <libavutil/version.h>
+#include <libswscale/swscale.h>
+#include <libswscale/version.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -43,6 +46,7 @@
 const int moonfire_ffmpeg_compiled_libavcodec_version = LIBAVCODEC_VERSION_INT;
 const int moonfire_ffmpeg_compiled_libavformat_version = LIBAVFORMAT_VERSION_INT;
 const int moonfire_ffmpeg_compiled_libavutil_version = LIBAVUTIL_VERSION_INT;
+const int moonfire_ffmpeg_compiled_libswscale_version = LIBSWSCALE_VERSION_INT;
 
 const int moonfire_ffmpeg_av_dict_ignore_suffix = AV_DICT_IGNORE_SUFFIX;
 
@@ -56,6 +60,8 @@ const int moonfire_ffmpeg_averror_decoder_not_found = AVERROR_DECODER_NOT_FOUND;
 const int moonfire_ffmpeg_averror_eof = AVERROR_EOF;
 const int moonfire_ffmpeg_averror_enomem = AVERROR(ENOMEM);
 const int moonfire_ffmpeg_averror_unknown = AVERROR_UNKNOWN;
+
+const int moonfire_ffmpeg_sws_bilinear = SWS_BILINEAR;
 
 // Prior to libavcodec 58.9.100, multithreaded callers were expected to supply
 // a lock callback. That release deprecated this API. It also introduced a
@@ -127,12 +133,16 @@ struct VideoParameters {
     AVRational time_base;
 };
 
-struct moonfire_ffmpeg_frame_stuff {
-    uint8_t **data;
-    int *linesizes;
-    int format;
+struct moonfire_ffmpeg_image_dimensions {
     int width;
     int height;
+    int pix_fmt;
+};
+
+struct moonfire_ffmpeg_frame_stuff {
+    struct moonfire_ffmpeg_image_dimensions dims;
+    uint8_t **data;
+    int *linesizes;
 };
 
 struct moonfire_ffmpeg_streams moonfire_ffmpeg_fctx_streams(AVFormatContext *ctx) {
@@ -188,25 +198,42 @@ int moonfire_ffmpeg_cctx_height(AVCodecContext *cctx) { return cctx->height; }
 int moonfire_ffmpeg_cctx_width(AVCodecContext *cctx) { return cctx->width; }
 int moonfire_ffmpeg_cctx_pix_fmt(AVCodecContext *cctx) { return cctx->pix_fmt; }
 
-int moonfire_ffmpeg_frame_height(AVFrame *frame) { return frame->height; }
-int moonfire_ffmpeg_frame_width(AVFrame *frame) { return frame->width; }
-int moonfire_ffmpeg_frame_pix_fmt(AVFrame *frame) { return frame->format; }
+int moonfire_ffmpeg_frame_image_alloc(
+    AVFrame* frame, struct moonfire_ffmpeg_image_dimensions* dims) {
+    // TODO: any reason to support an alignment other than 32?
+    int r = av_image_alloc(frame->data, frame->linesize, dims->width, dims->height, dims->pix_fmt,
+                           32);
+    if (r < 0) {
+        return r;
+    }
+    frame->width = dims->width;
+    frame->height = dims->height;
+    frame->format = dims->pix_fmt;
+    return r;
+}
+
 void moonfire_ffmpeg_frame_stuff(AVFrame *frame,
                                  struct moonfire_ffmpeg_frame_stuff* s) {
+    s->dims.width = frame->width;
+    s->dims.height = frame->height;
+    s->dims.pix_fmt = frame->format;
     s->data = frame->data;
     s->linesizes = frame->linesize;
-    s->format = frame->format;
-    s->width = frame->width;
-    s->height = frame->height;
 }
 
 int moonfire_ffmpeg_codecpar_codec_id(AVCodecParameters *codecpar) { return codecpar->codec_id; }
 int moonfire_ffmpeg_codecpar_codec_type(AVCodecParameters *codecpar) {
     return codecpar->codec_type;
 }
+struct moonfire_ffmpeg_image_dimensions moonfire_ffmpeg_codecpar_dims(AVCodecParameters *codecpar) {
+    struct moonfire_ffmpeg_image_dimensions d = {
+        .width = codecpar->width,
+        .height = codecpar->height,
+        .pix_fmt = codecpar->format
+    };
+    return d;
+}
 struct moonfire_ffmpeg_data moonfire_ffmpeg_codecpar_extradata(AVCodecParameters *codecpar) {
     struct moonfire_ffmpeg_data d = {codecpar->extradata, codecpar->extradata_size};
     return d;
 }
-int moonfire_ffmpeg_codecpar_height(AVCodecParameters *codecpar) { return codecpar->height; }
-int moonfire_ffmpeg_codecpar_width(AVCodecParameters *codecpar) { return codecpar->width; }
