@@ -121,6 +121,9 @@ extern "C" {
     static moonfire_ffmpeg_averror_decoder_not_found: libc::c_int;
     static moonfire_ffmpeg_averror_unknown: libc::c_int;
 
+    static moonfire_ffmpeg_pix_fmt_rgb24: libc::c_int;
+    static moonfire_ffmpeg_pix_fmt_bgr24: libc::c_int;
+
     static moonfire_ffmpeg_sws_bilinear: libc::c_int;
 
     fn moonfire_ffmpeg_init();
@@ -160,6 +163,7 @@ extern "C" {
     //                                   url: *const libc::c_char) -> libc::c_int;
 
     fn moonfire_ffmpeg_stream_codecpar(stream: *const AVStream) -> *const AVCodecParameters;
+    fn moonfire_ffmpeg_stream_duration(stream: *const AVStream) -> i64;
     fn moonfire_ffmpeg_stream_time_base(stream: *const AVStream) -> AVRational;
 
     // avutil
@@ -284,6 +288,7 @@ struct FrameStuff {
     dims: ImageDimensions,
     data: *const *mut u8,
     linesizes: *const libc::c_int,
+    pts: i64,
 }
 
 // matches moonfire_ffmpeg_streams_len
@@ -379,6 +384,8 @@ impl<'o> InputStream<'o> {
     pub fn time_base(&self) -> AVRational {
         unsafe { moonfire_ffmpeg_stream_time_base(self.0) }
     }
+
+    pub fn duration(&self) -> i64 { unsafe { moonfire_ffmpeg_stream_duration(self.0) } }
 }
 
 pub struct InputCodecParameters<'s>(&'s AVCodecParameters);
@@ -538,7 +545,7 @@ pub struct Plane<'f> {
 
 impl VideoFrame {
     /// Creates a new `VideoFrame` which is empty: no allocated storage (reference-counted or
-    /// otherwise). Can be filled via `DecodeContexst::decode_video`.
+    /// otherwise). Can be filled via `DecodeContext::decode_video`.
     pub fn empty() -> Result<Self, Error> {
         let frame = ptr::NonNull::new(unsafe { av_frame_alloc() }).ok_or_else(Error::enomem)?;
         Ok(VideoFrame {
@@ -551,6 +558,7 @@ impl VideoFrame {
                 },
                 data: ptr::null(),
                 linesizes: ptr::null(),
+                pts: 0,
             },
         })
     }
@@ -582,6 +590,7 @@ impl VideoFrame {
     }
 
     pub fn dims(&self) -> ImageDimensions { self.stuff.dims }
+    pub fn pts(&self) -> i64 { self.stuff.pts }
 }
 
 impl Drop for VideoFrame {
@@ -597,6 +606,11 @@ impl Drop for VideoFrame {
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct PixelFormat(libc::c_int);
+
+impl PixelFormat {
+    pub fn rgb24() -> Self { PixelFormat(unsafe { moonfire_ffmpeg_pix_fmt_rgb24 }) }
+    pub fn bgr24() -> Self { PixelFormat(unsafe { moonfire_ffmpeg_pix_fmt_bgr24 }) }
+}
 
 impl fmt::Debug for PixelFormat {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -643,7 +657,6 @@ impl Scaler {
         // TODO: yuvj420p causes an annoying warning "deprecated pixel format used, make sure you
         // did set range correctly" here. Looks like we need to change to yuv420p and call
         // sws_setColorspaceDetails to get the same effect while suppressing this warning.
-        println!("scaler for {} -> {}", src, dst);
         let ctx = ptr::NonNull::new(unsafe {
             sws_getContext(src.width, src.height, src.pix_fmt.0, dst.width, dst.height,
                            dst.pix_fmt.0, moonfire_ffmpeg_sws_bilinear, ptr::null_mut(),

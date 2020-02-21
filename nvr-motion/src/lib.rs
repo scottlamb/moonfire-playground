@@ -1,5 +1,3 @@
-extern crate moonfire_ffmpeg;
-
 #[cfg(test)]
 mod tests {
     #[test]

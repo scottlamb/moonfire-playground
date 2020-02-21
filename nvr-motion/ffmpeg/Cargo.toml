@@ -17,3 +17,6 @@ parking_lot = { version = "0.9", features = [] }
 [build-dependencies]
 cc = "1.0"
 pkg-config = "0.3"
+
+[profile.release]
+debug = true

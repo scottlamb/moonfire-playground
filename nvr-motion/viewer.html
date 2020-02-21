@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>video test</title>
+    <script>
+      /*function compileSearch(funcName, predicate, reversed, extraArgs, earlyOut) {
+        var code = [
+          "function ", funcName, "(a,l,h,", extraArgs.join(","),  "){",
+          earlyOut ? "" : "var i=", (reversed ? "l-1" : "h+1"),
+          ";while(l<=h){var m=(l+h)>>>1,x=a[m]"]
+        if(earlyOut) {
+          if(predicate.indexOf("c") < 0) {
+            code.push(";if(x===y){return m}else if(x<=y){")
+          } else {
+            code.push(";var p=c(x,y);if(p===0){return m}else if(p<=0){")
+          }
+        } else {
+          code.push(";if(", predicate, "){i=m;")
+        }
+        if(reversed) {
+          code.push("l=m+1}else{h=m-1}")
+        } else {
+          code.push("h=m-1}else{l=m+1}")
+        }
+        code.push("}")
+        if(earlyOut) {
+          code.push("return -1};")
+        } else {
+          code.push("return i};")
+        }
+        return code.join("")
+      }
+
+      function compileBoundsSearch(predicate, reversed, suffix, earlyOut) {
+        var result = new Function([
+        compileSearch("A", "x" + predicate + "y", reversed, ["y"], earlyOut),
+        compileSearch("P", "c(x,y)" + predicate + "0", reversed, ["y", "c"], earlyOut),
+      "function dispatchBsearch", suffix, "(a,y,c,l,h){\
+      if(typeof(c)==='function'){\
+      return P(a,(l===void 0)?0:l|0,(h===void 0)?a.length-1:h|0,y,c)\
+      }else{\
+      return A(a,(c===void 0)?0:c|0,(l===void 0)?a.length-1:l|0,y)\
+      }}\
+      return dispatchBsearch", suffix].join(""))
+        return result()
+      }
+
+      let ge = compileBoundsSearch(">=", false,  "GE");
+      let gt = compileBoundsSearch(">",  false,  "GT");
+      let lt = compileBoundsSearch("<",  true,   "LT");
+      let le = compileBoundsSearch("<=", true,   "LE");
+      let eq = compileBoundsSearch("-",  true,   "EQ", true);*/
+
+      function onLoad() {
+        let urlParams = new URLSearchParams(window.location.search);
+        let videoName = urlParams.get('video');
+
+        let outerElem = document.getElementById('outer');
+        let videoElem = document.getElementById('v');
+        let sourceElem = document.createElement('source');
+        sourceElem.setAttribute('src', videoName + '.mp4');
+        videoElem.appendChild(sourceElem);
+
+        let textTrackElem = document.createElement('track');
+        textTrackElem.setAttribute('kind', 'metadata');
+        textTrackElem.setAttribute('src', videoName + '.vtt');
+        textTrackElem.setAttribute('default', 'default');
+        videoElem.appendChild(textTrackElem);
+
+        let resolutionElem = document.getElementById('resolution');
+        let rateElem = document.getElementById('rate');
+        let loaded = false;
+
+        document.addEventListener("keydown", (event) => {
+          if (!loaded) {
+            return;
+          }
+          if (event.key == 'n') {
+            // TODO: use binary search.
+            for (cue of videoElem.textTracks[0].cues) {
+              if (cue.startTime > videoElem.currentTime) {
+                let msg = JSON.parse(cue.text);
+                if (msg.label == 'person') {
+                  console.log('n press: advancing from ', videoElem.currentTime, ' to ',
+                              cue.startTime);
+                  videoElem.currentTime = cue.startTime;
+                  return;
+                }
+              }
+            }
+            console.log('n press: no person after ', videoElem.currentTime);
+          } else if (event.key == 'h') {
+            videoElem.currentTime = Math.max(0., videoElem.currentTime - 10.);
+          } else if (event.key == 'l') {
+            videoElem.currentTime = Math.min(videoElem.duration, videoElem.currentTime + 10.);
+          }
+        });
+
+        function resize() {
+          if (resolutionElem.value == "") {
+            outerElem.style.width = videoElem.videoWidth + 'px';
+            outerElem.style.height = videoElem.videoHeight + 'px';
+          } else {
+            let split = resolutionElem.value.split('x');
+            outerElem.style.width = split[0] + 'px';
+            outerElem.style.height = split[1] + 'px';
+          }
+        }
+
+        function setRate() {
+          let newRate = parseFloat(rateElem.value);
+          console.log('changing rate from ', videoElem.playbackRate, ' to ', newRate);
+          videoElem.playbackRate = newRate;
+        }
+
+        resolutionElem.addEventListener('change', (event) => {
+          console.log('resolution change: ', event);
+          resize();
+        });
+
+        rateElem.addEventListener('change', (event) => {
+          console.log('rate change: ', event);
+          setRate();
+        });
+
+        videoElem.addEventListener('loadedmetadata', (event) => {
+          console.log('video loadedmetadata: ', event);
+          loaded = true;
+          resize();
+          setRate();
+          videoElem.focus();
+        });
+
+        textTrackElem.addEventListener('cuechange', (event) => {
+          console.log('track cuechange: ', event);
+          let cues = event.target.track.activeCues;
+          let svg = document.getElementById('overlay');
+          while (svg.hasChildNodes()) {
+            svg.removeChild(svg.firstChild);
+          }
+          for (const cue of cues) {
+            let msg = JSON.parse(cue.text);
+            let rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+            rect.setAttribute('x', msg.x * 100 + '%');
+            rect.setAttribute('y', msg.y * 100 + '%');
+            rect.setAttribute('width', msg.w * 100 + '%');
+            rect.setAttribute('height', msg.h * 100 + '%');
+            rect.setAttribute('stroke', 'red');
+            rect.setAttribute('fill', 'none');
+            svg.appendChild(rect);
+            let text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            text.setAttribute('x', msg.x * 100 + '%');
+            text.setAttribute('y', (msg.y + msg.h) * 100 + '%');
+            text.setAttribute('fill', 'red');
+            text.appendChild(document.createTextNode(Math.round(msg.score *
+              100) + '%: ' + msg.label));
+            svg.appendChild(text);
+          }
+        });
+      }
+    </script>
+    <style>
+      #outer { position: relative; }
+      #outer video {
+        position: absolute;
+        width: 100%;
+        height: 100%;
+        z-index: 1;
+        object-fit: fill;
+      }
+      #outer svg {
+        position: absolute;
+        width: 100%;
+        height: 100%;
+        z-index: 2;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body onload="onLoad()">
+    <div id="outer">
+      <video id="v" controls>
+      </video>
+      <svg id="overlay" xmlns="http://www.w3.org/2000/svg">
+      </svg>
+    </div>
+    <p><label for="resolution">Display resolution: </label>
+    <select id="resolution">
+      <option value="">match input resolution</option>
+      <option value="704x480">704x480 (4CIF)</option>
+      <option value="528x360">528x360</option>
+      <option value="528x320">528x320 (DCIF)</option>
+      <option value="440x360">440x360</option>
+      <option value="352x300">352x300</option>
+      <option value="320x320">320x320</option>
+      <option value="300x300">300x300 (coral.ai/models MobileNet SSD v2 (COCO) size)</option>
+    </select>
+    <p><label for="rate">Playback rate: </label>
+    <select id="rate">
+      <option value="0.1">0.1</option>
+      <option value="0.5">0.5</option>
+      <option value="0.75">0.75</option>
+      <option value="1.0" selected>1.0</option>
+      <option value="1.25">1.25</option>
+      <option value="1.5">1.5</option>
+      <option value="2.0">2.0</option>
+      <option value="5.0">5.0</option>
+      <option value="10.0">10.0</option>
+    </select>
+  </body>
+</html>

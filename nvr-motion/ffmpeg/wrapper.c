@@ -61,6 +61,9 @@ const int moonfire_ffmpeg_averror_eof = AVERROR_EOF;
 const int moonfire_ffmpeg_averror_enomem = AVERROR(ENOMEM);
 const int moonfire_ffmpeg_averror_unknown = AVERROR_UNKNOWN;
 
+const int moonfire_ffmpeg_pix_fmt_rgb24 = AV_PIX_FMT_RGB24;
+const int moonfire_ffmpeg_pix_fmt_bgr24 = AV_PIX_FMT_BGR24;
+
 const int moonfire_ffmpeg_sws_bilinear = SWS_BILINEAR;
 
 // Prior to libavcodec 58.9.100, multithreaded callers were expected to supply
@@ -143,6 +146,7 @@ struct moonfire_ffmpeg_frame_stuff {
     struct moonfire_ffmpeg_image_dimensions dims;
     uint8_t **data;
     int *linesizes;
+    int64_t pts;
 };
 
 struct moonfire_ffmpeg_streams moonfire_ffmpeg_fctx_streams(AVFormatContext *ctx) {
@@ -186,6 +190,7 @@ struct moonfire_ffmpeg_data moonfire_ffmpeg_packet_data(AVPacket *pkt) {
 }
 
 AVCodecParameters *moonfire_ffmpeg_stream_codecpar(AVStream *stream) { return stream->codecpar; }
+int64_t moonfire_ffmpeg_stream_duration(AVStream *stream) { return stream->duration; }
 AVRational moonfire_ffmpeg_stream_time_base(AVStream *stream) { return stream->time_base; }
 
 int moonfire_ffmpeg_cctx_codec_id(AVCodecContext *cctx) { return cctx->codec_id; }
@@ -219,6 +224,7 @@ void moonfire_ffmpeg_frame_stuff(AVFrame *frame,
     s->dims.pix_fmt = frame->format;
     s->data = frame->data;
     s->linesizes = frame->linesize;
+    s->pts = frame->pts;
 }
 
 int moonfire_ffmpeg_codecpar_codec_id(AVCodecParameters *codecpar) { return codecpar->codec_id; }
