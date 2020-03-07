@@ -4,12 +4,30 @@ version = "0.1.0"
 authors = ["Scott Lamb <slamb@slamb.org>"]
 edition = "2018"
 
+[[bin]]
+name = "inferencer"
+
+[[bin]]
+name = "inferencer_server"
+required-features = ["moonfire-tflite"]
+
+[[bin]]
+name = "webvtt_standalone"
+required-features = ["moonfire-tflite"]
+
 [dependencies]
 cstr = "0.1.7"
 moonfire-ffmpeg = { path = "ffmpeg" }
-moonfire-tflite = { path = "tflite" }
+moonfire-tflite = { path = "tflite", optional = true }
+prost = "0.6"
 serde = { version = "1.0.104", features = ["derive"] }
 serde_json = "1.0.48"
+tokio = { version = "0.2.0", features = ["blocking", "macros", "rt-threaded", "signal"] }
+tonic = "0.1"
+
+[build-dependencies]
+prost-build = "0.6.1"
+tonic-build = "0.1.0"
 
 [workspace]
 members = ["ffmpeg", "tflite"]

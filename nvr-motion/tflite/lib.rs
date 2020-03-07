@@ -154,7 +154,7 @@ pub enum Type {  // aka TfLiteType
 }
 
 #[derive(Copy, Clone)]
-#[repr(C)]
+#[repr(transparent)]
 struct TfLiteStatus(libc::c_int);
 
 // #[link(name = "tensorflowlite_c")
@@ -272,6 +272,9 @@ impl<'a> Drop for Interpreter<'a> {
         unsafe { TfLiteInterpreterDelete(self.interpreter.as_ptr()) };
     }
 }
+
+unsafe impl<'a> Send for Interpreter<'a> {}
+unsafe impl<'a> Sync for Interpreter<'a> {}
 
 pub struct InputTensors<'i> {
     interpreter: &'i Interpreter<'i>,

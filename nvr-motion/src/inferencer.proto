@@ -1,0 +1,93 @@
+// vim: set sw=2 et
+
+syntax = "proto3";
+
+package org.moonfire_nvr.inferencer;
+
+// Data model
+
+enum ModelType {
+  MODEL_TYPE_UNKNOWN = 0;
+  MODEL_CLASSIFICATION = 1;
+  MODEL_OBJECT_DETECTION = 2;
+  MODEL_SEMANTIC_SEGMENTATION = 3;
+}
+
+enum PixelFormat {
+  PIXEL_FORMAT_UNKNOWN = 0;
+  PIXEL_FORMAT_RGB24 = 1;
+}
+
+message ImageParameters {
+  PixelFormat pixel_format = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+}
+
+message Model {
+  string uuid = 1;
+  ModelType type = 2;
+  bool active = 3;
+  ImageParameters input_parameters = 4;
+  map<uint32, string> labels = 5;
+}
+
+message ObjectDetectionResult {
+  // Parallel arrays; all of these must be the same length.
+  repeated float x = 1;
+  repeated float y = 2;
+  repeated float w = 3;
+  repeated float h = 4;
+  repeated float score = 5;
+  repeated uint32 label = 6;
+}
+
+message ImageResult {
+  oneof model_result {
+    // These correspond to ModelType enum values.
+    ObjectDetectionResult object_detection_result = 2;
+  }
+}
+
+// Request and response protos
+
+message ListModelsRequest {}
+
+message ListModelsResponse {
+  repeated Model model = 1;
+}
+
+message ProcessImageRequest {
+  int32 priority = 1;
+  string model_uuid = 2;
+
+  // Currently a raw, prescaled image. Will change.
+  bytes image = 3;
+}
+
+message ProcessImageResponse {
+  ImageResult result = 1;
+}
+
+message ProcessVideoRequest {
+  int32 priority = 1;
+
+  // TODO: how to pass in codec? encoding (eg Annex B or mp4)? extradata?
+  bytes data = 2;
+}
+
+message ProcessVideoResponse {
+  message Frame {
+    ImageResult result = 1;
+  }
+
+  repeated Frame frame = 2;
+}
+
+service Inferencer {
+  rpc ListModels (ListModelsRequest) returns (ListModelsResponse) {}
+
+  rpc ProcessImage (ProcessImageRequest) returns (ProcessImageResponse) {}
+
+  rpc ProcessVideo (stream ProcessVideoRequest) returns (ProcessVideoResponse) {}
+}
