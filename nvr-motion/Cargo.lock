@@ -455,6 +455,7 @@ dependencies = [
 [[package]]
 name = "moonfire-tflite"
 version = "0.0.1"
+source = "git+https://github.com/scottlamb/moonfire-tflite#72ce9995d2d9a9800e94f5218f0b43d0ea8ab4f6"
 dependencies = [
  "cc",
  "libc",

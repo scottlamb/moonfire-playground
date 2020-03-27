@@ -24,8 +24,8 @@ fn copy(from: &moonfire_ffmpeg::VideoFrame, to: &mut moonfire_tflite::Tensor) {
 
 fn label(class: f32) -> Option<&'static str> {
     let class = class as usize;  // TODO: better way to do this?
-    if class < moonfire_tflite::LABELS.len() {
-        moonfire_tflite::LABELS[class]
+    if class < moonfire_motion::LABELS.len() {
+        moonfire_motion::LABELS[class]
     } else {
         None
     }
@@ -69,7 +69,7 @@ fn write_objs(mut stdout: &mut dyn Write, start: Pts, end: Pts, objs: &[Object])
 }
 
 fn main() {
-    let m = moonfire_tflite::Model::from_static(moonfire_tflite::MODEL).unwrap();
+    let m = moonfire_tflite::Model::from_static(moonfire_motion::MODEL).unwrap();
     let delegate;
     let mut builder = moonfire_tflite::Interpreter::builder();
     let devices = moonfire_tflite::edgetpu::Devices::list();
