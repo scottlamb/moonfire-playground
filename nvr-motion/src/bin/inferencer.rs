@@ -2,6 +2,7 @@
 //! .mp4 file. Each cue represents a single object for a single frame.
 
 //use cstr::*;
+use moonfire_ffmpeg::avutil::{Rational, VideoFrame};
 use proto::inferencer_client::InferencerClient;
 use serde::Serialize;
 use std::convert::TryFrom;
@@ -18,7 +19,7 @@ mod proto {
 }
 
 /// Copies from a RGB24 VideoFrame to a 1xHxWx3 Tensor.
-fn extract(from: &moonfire_ffmpeg::VideoFrame) -> Vec<u8> {
+fn extract(from: &VideoFrame) -> Vec<u8> {
     let from = from.plane(0);
     let (w, h) = (from.width, from.height);
     let mut to = vec![0; w * h * 3];
@@ -42,7 +43,7 @@ struct Object<'m> {
     h: f32,
 }
 
-struct Pts(i64, moonfire_ffmpeg::AVRational);
+struct Pts(i64, Rational);
 
 impl std::fmt::Display for Pts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -88,8 +89,8 @@ async fn main() -> Result<(), BoxedError> {
 
     let url = env::args().nth(1).expect("missing url");
     let _ffmpeg = moonfire_ffmpeg::Ffmpeg::new();
-    let mut open_options = moonfire_ffmpeg::Dictionary::new();
-    let mut input = moonfire_ffmpeg::InputFormatContext::open(&CString::new(url).unwrap(),
+    let mut open_options = moonfire_ffmpeg::avutil::Dictionary::new();
+    let mut input = moonfire_ffmpeg::avformat::InputFormatContext::open(&CString::new(url).unwrap(),
                                                               &mut open_options).unwrap();
     input.find_stream_info().unwrap();
 
@@ -100,7 +101,7 @@ async fn main() -> Result<(), BoxedError> {
     let stream = input.streams().get(VIDEO_STREAM);
     let time_base = stream.time_base();
     let par = stream.codecpar();
-    let mut dopt = moonfire_ffmpeg::Dictionary::new();
+    let mut dopt = moonfire_ffmpeg::avutil::Dictionary::new();
     //dopt.set(cstr!("refcounted_frames"), cstr!("0")).unwrap();  // TODO?
     let d = par.new_decoder(&mut dopt).unwrap();
 
@@ -109,17 +110,17 @@ async fn main() -> Result<(), BoxedError> {
         Some(p) => p,
     };
 
-    let mut scaled = moonfire_ffmpeg::VideoFrame::owned(moonfire_ffmpeg::ImageDimensions {
+    let mut scaled = VideoFrame::owned(moonfire_ffmpeg::avutil::ImageDimensions {
         width: i32::try_from(model_par.width).unwrap(),
         height: i32::try_from(model_par.height).unwrap(),
         pix_fmt: if model_par.pixel_format == (proto::PixelFormat::Rgb24 as i32) {
-            moonfire_ffmpeg::PixelFormat::rgb24()
+            moonfire_ffmpeg::avutil::PixelFormat::rgb24()
         } else {
             panic!("Unknown pixel format {}", model_par.pixel_format);
         },
     }).unwrap();
-    let mut f = moonfire_ffmpeg::VideoFrame::empty().unwrap();
-    let mut s = moonfire_ffmpeg::Scaler::new(par.dims(), scaled.dims()).unwrap();
+    let mut f = VideoFrame::empty().unwrap();
+    let mut s = moonfire_ffmpeg::swscale::Scaler::new(par.dims(), scaled.dims()).unwrap();
     let mut prev_pts = 0;
     let mut prev_objs: Vec<Object> = Vec::new();
     let stdout = std::io::stdout();

@@ -4,9 +4,6 @@ version = "0.1.0"
 authors = ["Scott Lamb <slamb@slamb.org>"]
 edition = "2018"
 
-#[features]
-#tflite = ["moonfire-tflite"]
-
 [[bin]]
 name = "inferencer"
 
@@ -20,7 +17,7 @@ required-features = ["moonfire-tflite"]
 
 [dependencies]
 cstr = "0.1.7"
-moonfire-ffmpeg = { path = "ffmpeg" }
+moonfire-ffmpeg = { git = "https://github.com/scottlamb/moonfire-ffmpeg", features = ["swscale"] }
 moonfire-tflite = { git = "https://github.com/scottlamb/moonfire-tflite", features = ["edgetpu"], optional = true }
 prost = "0.6"
 serde = { version = "1.0.104", features = ["derive"] }
@@ -31,9 +28,6 @@ tonic = "0.1"
 [build-dependencies]
 prost-build = "0.6.1"
 tonic-build = "0.1.0"
-
-[workspace]
-members = ["ffmpeg"]
 
 [profile.release]
 debug = true
