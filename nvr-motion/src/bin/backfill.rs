@@ -3,9 +3,10 @@
 //! TODO: keep state.
 
 use cstr::*;
-use failure::{Error, bail};
+use failure::{Error, bail, format_err};
 use log::{info, trace};
 use moonfire_ffmpeg::avutil::VideoFrame;
+use rayon::prelude::*;
 use std::convert::TryFrom;
 use std::sync::Arc;
 use structopt::StructOpt;
@@ -27,18 +28,31 @@ struct Opt {
 }
 
 struct Context<'a> {
+    // Stuff for fetching recordings.
     client: moonfire_nvr_client::Client,
-    interpreter: parking_lot::Mutex<moonfire_tflite::Interpreter<'a>>,
-    width: usize,
-    height: usize,
     start: Option<moonfire_nvr_client::Time>,
     end: Option<moonfire_nvr_client::Time>,
+
+    // Stuff for processing recordings.
+    // This supports using multiple interpreters, one per Edge TPU device.
+    // Use a crossbeam channel as a crude object pool: receive one, use it, send it back.
+    interpreter_tx: crossbeam::channel::Sender<moonfire_tflite::Interpreter<'a>>,
+    interpreter_rx: crossbeam::channel::Receiver<moonfire_tflite::Interpreter<'a>>,
+    width: usize,
+    height: usize,
 }
 
 /// Gets the id range of committed recordings indicated by `r`.
 fn id_range(r: &moonfire_nvr_client::Recording) -> std::ops::Range<i32> {
     let end_id = r.first_uncommitted.unwrap_or(r.end_id.unwrap_or(r.start_id) + 1);
     r.start_id .. end_id
+}
+
+async fn list_recordings(ctx: &Context<'_>) -> Result<Vec<Option<(Stream, Vec<i32>)>>, Error> {
+    let top_level = ctx.client.top_level(&moonfire_nvr_client::TopLevelRequest::default())
+        .await?;
+    Ok(futures::future::try_join_all(
+        top_level.cameras.iter().map(|c| process_camera(&ctx, c))).await?)
 }
 
 async fn process_camera(ctx: &Context<'_>, camera: &moonfire_nvr_client::Camera)
@@ -78,8 +92,14 @@ struct Stream {
     stream_name: String,
 }
 
-async fn process_recording(ctx: &Context<'_>, stream: &Stream, id: i32)
-                           -> Result<(), Error> {
+struct Recording {
+    stream_i: u32,
+    id: i32,
+    body: bytes::Bytes,
+}
+
+async fn fetch_recording(ctx: &Context<'_>, stream: &Stream, id: i32)
+                         -> Result<bytes::Bytes, Error> {
     trace!("recording {}/{}/{}", &stream.camera_short_name, &stream.stream_name, id);
     let resp = ctx.client.view(&moonfire_nvr_client::ViewRequest {
         camera: stream.camera_uuid,
@@ -88,10 +108,12 @@ async fn process_recording(ctx: &Context<'_>, stream: &Stream, id: i32)
         s: &id.to_string(),
         ts: false,
     }).await?;
-    let body = resp.bytes().await?;
+    Ok(resp.bytes().await?)
+}
 
+fn process_recording(ctx: &Context<'_>, body: &[u8]) -> Result<(), Error> {
     let mut open_options = moonfire_ffmpeg::avutil::Dictionary::new();
-    let mut io_ctx = moonfire_ffmpeg::avformat::SliceIoContext::new(&body);
+    let mut io_ctx = moonfire_ffmpeg::avformat::SliceIoContext::new(body);
     let mut input = moonfire_ffmpeg::avformat::InputFormatContext::with_io_context(
         cstr!(""), &mut io_ctx, &mut open_options).unwrap();
     input.find_stream_info().unwrap();
@@ -126,36 +148,41 @@ async fn process_recording(ctx: &Context<'_>, stream: &Stream, id: i32)
             continue;
         }
         s.scale(&f, &mut scaled);
-        let mut interpreter = ctx.interpreter.lock();
+        let mut interpreter = ctx.interpreter_rx.recv().unwrap();
         moonfire_motion::copy(&scaled, &mut interpreter.inputs()[0]);
         interpreter.invoke().unwrap();
+        ctx.interpreter_tx.try_send(interpreter).unwrap();
     }
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Error> {
+fn main() -> Result<(), Error> {
     let mut h = moonfire_motion::init_logging();
     let _a = h.r#async();
     let opt = Opt::from_args();
 
     info!("Loading model");
     let m = moonfire_tflite::Model::from_static(moonfire_motion::MODEL).unwrap();
-    info!("Creating delegate");
+    info!("Creating interpreters");
     let devices = moonfire_tflite::edgetpu::Devices::list();
     if devices.is_empty() {
         bail!("no edge tpu ready");
     }
-    let delegate = devices[0].create_delegate().unwrap();
-    info!("Creating interpreter");
-    let mut builder = moonfire_tflite::Interpreter::builder();
-    builder.add_delegate(&delegate);
-    let mut interpreter = builder.build(&m).unwrap();
-    info!("Done creating interpreter");
+    let delegates = devices
+        .into_iter()
+        .map(|d| d.create_delegate())
+        .collect::<Result<Vec<_>, ()>>()
+        .map_err(|()| format_err!("Unable to create delegate"))?;
+    let mut interpreters = delegates.iter().map(|d| {
+        let mut builder = moonfire_tflite::Interpreter::builder();
+        builder.add_delegate(d);
+        builder.build(&m)
+    }).collect::<Result<Vec<_>, ()>>().map_err(|()| format_err!("Unable to build interpreter"))?;
+    info!("Done creating {} interpreters", interpreters.len());
 
     let (width, height);
     {
-        let inputs = interpreter.inputs();
+        let inputs = interpreters[0].inputs();
         let input = &inputs[0];
         let num_dims = input.num_dims();
         assert_eq!(num_dims, 4);
@@ -165,9 +192,16 @@ async fn main() -> Result<(), Error> {
         assert_eq!(input.dim(3), 3);
     }
 
+    // Fill the interpreter "pool" (channel).
+    let (interpreter_tx, interpreter_rx) = crossbeam::channel::bounded(interpreters.len());
+    for i in interpreters.into_iter() {
+        interpreter_tx.try_send(i).unwrap();
+    }
+
     let ctx = Context {
         client: moonfire_nvr_client::Client::new(opt.nvr, opt.cookie),
-        interpreter: parking_lot::Mutex::new(interpreter),
+        interpreter_tx,
+        interpreter_rx,
         width,
         height,
         start: opt.start,
@@ -175,30 +209,71 @@ async fn main() -> Result<(), Error> {
     };
 
     let _ffmpeg = moonfire_ffmpeg::Ffmpeg::new();
+    let mut rt = tokio::runtime::Runtime::new()?;
 
     info!("Finding recordings");
-    let top_level = ctx.client.top_level(&moonfire_nvr_client::TopLevelRequest::default()).await?;
-    let stuff = futures::future::try_join_all(
-        top_level.cameras.iter().map(|c| process_camera(&ctx, c))).await?;
-    //let streams = Vec::new();
-    //let recordings = Vec::new();
+    let stuff = rt.block_on(list_recordings(&ctx))?;
+    let mut streams = Vec::new();
+    let mut count = 0;
+    for s in &stuff {
+        if let Some((stream, ids)) = s.as_ref() {
+            streams.push(stream);
+            count += u64::try_from(ids.len()).unwrap();
+        }
+    }
 
-    let count = stuff.iter().map(|o| o.as_ref().map(|(_, ids)| ids.len() as u64).unwrap_or(0)).sum();
     info!("Found {} recordings", count);
-
     let progress = Arc::new(indicatif::ProgressBar::new(count)
         .with_style(indicatif::ProgressStyle::default_bar()
             .template("[{eta_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")
             .progress_chars("##-")));
 
-    for s in &stuff {
-        if let Some((stream, ids)) = s {
-            for &id in ids {
-                process_recording(&ctx, stream, id).await?;
+    let (decode_tx, decode_rx) = crossbeam::channel::bounded(16);
+    let mut decode_tx = Some(decode_tx);
+
+    rayon::scope(|s| {
+        // Decoder threads.
+        s.spawn(|_| {
+            let before = std::time::Instant::now();
+            info!("Decoder thread starting");
+            decode_rx.iter().par_bridge().try_for_each(|r: Recording| -> Result<(), Error> {
+                process_recording(&ctx, &r.body)?;
                 progress.inc(1);
+                Ok(())
+            }).unwrap();
+            info!("Decoder thread ending after {:?}", before.elapsed());
+            info!("asdf");
+        });
+
+        // Fetch thread.
+        // TODO: fetch thread per sample file dir? or maybe unnecessary, fast enough as is.
+        s.spawn(|_| {
+            let mut stream_i = 0;
+            let mut fetch_time = std::time::Duration::new(0, 0);
+            let mut send_time = std::time::Duration::new(0, 0);
+            let decode_tx = decode_tx.take().unwrap();
+            for s in &stuff {
+                if let Some((stream, ids)) = s {
+                    for &id in ids {
+                        let before = std::time::Instant::now();
+                        let body = rt.block_on(fetch_recording(&ctx, &stream, id)).unwrap();
+                        let between = std::time::Instant::now();
+                        decode_tx.send(Recording {
+                            stream_i,
+                            id,
+                            body,
+                        }).unwrap();
+                        let after = std::time::Instant::now();
+                        fetch_time += between.checked_duration_since(before).unwrap();
+                        send_time += after.elapsed();
+                    }
+                    stream_i += 1;
+                }
             }
-        }
-    }
+            info!("Fetch finishing; fetch time={:?} send time={:?}", fetch_time, send_time);
+        });
+    });
+
     progress.finish();
     Ok(())
 }
