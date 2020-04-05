@@ -1,36 +1,13 @@
 /// Writes a WebVTT metadata caption file representing all of the objects detected in the given
 /// .mp4 file. Each cue represents a single object for a single frame.
 
-//use cstr::*;
+use cstr::*;
 use moonfire_ffmpeg::avutil::{Rational, VideoFrame};
 use serde::Serialize;
 use std::convert::TryFrom;
 use std::env;
 use std::ffi::CString;
 use std::io::Write;
-
-/// Copies from a RGB24 VideoFrame to a 1xHxWx3 Tensor.
-fn copy(from: &VideoFrame, to: &mut moonfire_tflite::Tensor) {
-    let from = from.plane(0);
-    let to = to.bytes_mut();
-    let (w, h) = (from.width, from.height);
-    let mut from_i = 0;
-    let mut to_i = 0;
-    for _y in 0..h {
-        to[to_i..to_i+3*w].copy_from_slice(&from.data[from_i..from_i+3*w]);
-        from_i += from.linesize;
-        to_i += 3*w;
-    }
-}
-
-fn label(class: f32) -> Option<&'static str> {
-    let class = class as usize;  // TODO: better way to do this?
-    if class < moonfire_motion::LABELS.len() {
-        moonfire_motion::LABELS[class]
-    } else {
-        None
-    }
-}
 
 #[derive(Serialize)]
 struct Object {
@@ -107,7 +84,7 @@ fn main() {
     let time_base = stream.time_base();
     let par = stream.codecpar();
     let mut dopt = moonfire_ffmpeg::avutil::Dictionary::new();
-    //dopt.set(cstr!("refcounted_frames"), cstr!("0")).unwrap();  // TODO?
+    dopt.set(cstr!("refcounted_frames"), cstr!("0")).unwrap();  // TODO?
     let d = par.new_decoder(&mut dopt).unwrap();
 
     let mut scaled = VideoFrame::owned(moonfire_ffmpeg::avutil::ImageDimensions {
@@ -139,7 +116,7 @@ fn main() {
         prev_objs.clear();
         prev_pts = f.pts();
         s.scale(&f, &mut scaled);
-        copy(&scaled, &mut interpreter.inputs()[0]);
+        moonfire_motion::copy(&scaled, &mut interpreter.inputs()[0]);
         interpreter.invoke().unwrap();
         let outputs = interpreter.outputs();
         let boxes = outputs[0].f32s();
@@ -150,7 +127,7 @@ fn main() {
                 continue;
             }
             let class = classes[i];
-            let l = label(class);
+            let l = moonfire_motion::label(class);
             let box_ = &boxes[4*i..4*i+4];
             if let Some(label) = l {
                 prev_objs.push(Object {

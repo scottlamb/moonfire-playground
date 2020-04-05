@@ -109,6 +109,10 @@ fn process_image(interpreter: &mut moonfire_tflite::Interpreter, model: &proto::
 
 #[tonic::async_trait]
 impl Inferencer for MyInferencer {
+    type ProcessVideoStream = std::pin::Pin<Box<
+        dyn futures::Stream<Item = Result<proto::ProcessVideoResponse, tonic::Status>> +
+                            Send + Sync>>;
+
     async fn list_models(
         &self,
         _request: tonic::Request<proto::ListModelsRequest>,
@@ -140,7 +144,11 @@ impl Inferencer for MyInferencer {
     async fn process_video(
         &self,
         _request: tonic::Request<tonic::Streaming<proto::ProcessVideoRequest>>,
-    ) -> Result<tonic::Response<proto::ProcessVideoResponse>, tonic::Status> {
+    ) -> Result<tonic::Response<Self::ProcessVideoStream>, tonic::Status> {
+        /*let mut ctx = None;
+        while let Some(msg) = request.message().await? {
+            ctx = Some(moonfire_ffmpeg::avformat::InputFormatContext
+        }*/
         Err(tonic::Status::new(tonic::Code::Unimplemented, "process_video unimplemented"))
     }
 }
@@ -156,6 +164,7 @@ async fn main() -> Result<(), BoxedError> {
         Some(&*Box::leak(Box::new(devices[0].create_delegate().unwrap())))
     };
     let inferencer = MyInferencer::new(delegate)?;
+    moonfire_ffmpeg::Ffmpeg::new();
 
     tonic::transport::Server::builder()
         .add_service(InferencerServer::new(inferencer))

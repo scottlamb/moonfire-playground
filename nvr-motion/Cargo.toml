@@ -9,21 +9,31 @@ name = "inferencer"
 
 [[bin]]
 name = "inferencer_server"
-required-features = ["moonfire-tflite"]
+#required-features = ["moonfire-tflite"]
 
 [[bin]]
 name = "webvtt_standalone"
-required-features = ["moonfire-tflite"]
+#required-features = ["moonfire-tflite"]
 
 [dependencies]
 cstr = "0.1.7"
+failure = "0.1.7"
+futures = "0.3.4"
+log = { version = "0.4.8", features = ["release_max_level_debug"] }
+indicatif = "0.14.0"
+moonfire-nvr-client = { path = "../client" }
 moonfire-ffmpeg = { git = "https://github.com/scottlamb/moonfire-ffmpeg", features = ["swscale"] }
-moonfire-tflite = { git = "https://github.com/scottlamb/moonfire-tflite", features = ["edgetpu"], optional = true }
+moonfire-tflite = { git = "https://github.com/scottlamb/moonfire-tflite", features = ["edgetpu"], optional = false }
+mylog = { git = "https://github.com/scottlamb/mylog" }
+parking_lot = "0.10.0"
 prost = "0.6"
+reqwest = "0.10.4"
 serde = { version = "1.0.104", features = ["derive"] }
 serde_json = "1.0.48"
+structopt = "0.3.12"
 tokio = { version = "0.2.0", features = ["blocking", "macros", "rt-threaded", "signal"] }
 tonic = "0.1"
+uuid = "0.8.1"
 
 [build-dependencies]
 prost-build = "0.6.1"

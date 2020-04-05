@@ -1,4 +1,5 @@
-camera-motion/target
-nvr-motion/ffmpeg/target
-nvr-motion/target
-onvif/target
+/camera-motion/target
+/client/target
+/nvr-motion/ffmpeg/target
+/nvr-motion/target
+/onvif/target

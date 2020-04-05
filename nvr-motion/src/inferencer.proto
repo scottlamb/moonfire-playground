@@ -72,8 +72,13 @@ message ProcessImageResponse {
 message ProcessVideoRequest {
   int32 priority = 1;
 
-  // TODO: how to pass in codec? encoding (eg Annex B or mp4)? extradata?
-  bytes data = 2;
+  // A ISO-14496 initialization segment. One should be sent at the beginning
+  // of the stream.
+  bytes init_segment = 2;
+
+  // Packets (one encoded frame, potentially several NALs in the case of
+  // H.264) of video.
+  repeated bytes packet = 3;
 }
 
 message ProcessVideoResponse {
@@ -89,5 +94,5 @@ service Inferencer {
 
   rpc ProcessImage (ProcessImageRequest) returns (ProcessImageResponse) {}
 
-  rpc ProcessVideo (stream ProcessVideoRequest) returns (ProcessVideoResponse) {}
+  rpc ProcessVideo (stream ProcessVideoRequest) returns (stream ProcessVideoResponse) {}
 }
