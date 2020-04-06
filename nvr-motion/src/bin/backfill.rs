@@ -7,6 +7,7 @@ use failure::{Error, bail, format_err};
 use log::{info, trace};
 use moonfire_ffmpeg::avutil::VideoFrame;
 use rayon::prelude::*;
+use rusqlite::params;
 use std::convert::TryFrom;
 use std::sync::Arc;
 use structopt::StructOpt;
@@ -20,6 +21,9 @@ struct Opt {
     #[structopt(short, long, parse(try_from_str))]
     nvr: reqwest::Url,
 
+    #[structopt(short, long, parse(from_os_str))]
+    db: std::path::PathBuf,
+
     #[structopt(short, long, parse(try_from_str))]
     start: Option<moonfire_nvr_client::Time>,
 
@@ -28,6 +32,8 @@ struct Opt {
 }
 
 struct Context<'a> {
+    conn: parking_lot::Mutex<rusqlite::Connection>,
+
     // Stuff for fetching recordings.
     client: moonfire_nvr_client::Client,
     start: Option<moonfire_nvr_client::Time>,
@@ -46,6 +52,22 @@ struct Context<'a> {
 fn id_range(r: &moonfire_nvr_client::Recording) -> std::ops::Range<i32> {
     let end_id = r.first_uncommitted.unwrap_or(r.end_id.unwrap_or(r.start_id) + 1);
     r.start_id .. end_id
+}
+
+/// Removes values from sorted Vec `from` if they are also in sorted Iterator `remove`.
+/// Takes O(from.len() + remove.len()) time.
+fn filter_sorted<'a, T: 'a + Ord, I: Iterator<Item = &'a T>>(from: &mut Vec<T>, mut remove: I) {
+    let mut cur_remove = remove.next();
+    from.retain(|e| {
+        while let Some(r) = cur_remove.as_ref() {
+            match e.cmp(r) {
+                std::cmp::Ordering::Less => return true,
+                std::cmp::Ordering::Equal => return false,
+                std::cmp::Ordering::Greater => cur_remove = remove.next(),
+            }
+        }
+        true
+    });
 }
 
 async fn list_recordings(ctx: &Context<'_>) -> Result<Vec<Option<(Stream, Vec<i32>)>>, Error> {
@@ -78,6 +100,29 @@ async fn process_camera(ctx: &Context<'_>, camera: &moonfire_nvr_client::Camera)
             ids.push(id);
         }
     }
+    if ids.is_empty() {
+        return Ok(None);
+    }
+    ids.sort();  // it's probably sorted, but make sure.
+    let conn = ctx.conn.lock();
+    let mut stmt = conn.prepare_cached(r#"
+        select
+          recording_id
+        from
+          recording_object_detection
+        where
+          camera_uuid = ? and
+          stream_name = ? and
+          ? <= recording_id and
+          recording_id <= ?
+        order by recording_id
+    "#)?;
+    let u = camera.uuid.as_bytes();
+    let existing = stmt
+        .query_map(params![&u[..], DESIRED_STREAM, ids.first().unwrap(), ids.last().unwrap()],
+                   |row| row.get::<_, i32>(0))?
+        .collect::<Result<Vec<i32>, rusqlite::Error>>()?;
+    filter_sorted(&mut ids, existing.iter());
     let stream = Stream {
         camera_short_name: camera.short_name.clone(),
         camera_uuid: camera.uuid,
@@ -111,9 +156,10 @@ async fn fetch_recording(ctx: &Context<'_>, stream: &Stream, id: i32)
     Ok(resp.bytes().await?)
 }
 
-fn process_recording(ctx: &Context<'_>, body: &[u8]) -> Result<(), Error> {
+fn process_recording(ctx: &Context<'_>, streams: &Vec<&Stream>, recording: &Recording)
+                     -> Result<(), Error> {
     let mut open_options = moonfire_ffmpeg::avutil::Dictionary::new();
-    let mut io_ctx = moonfire_ffmpeg::avformat::SliceIoContext::new(body);
+    let mut io_ctx = moonfire_ffmpeg::avformat::SliceIoContext::new(&recording.body);
     let mut input = moonfire_ffmpeg::avformat::InputFormatContext::with_io_context(
         cstr!(""), &mut io_ctx, &mut open_options).unwrap();
     input.find_stream_info().unwrap();
@@ -135,6 +181,7 @@ fn process_recording(ctx: &Context<'_>, body: &[u8]) -> Result<(), Error> {
     }).unwrap();
     let mut f = VideoFrame::empty().unwrap();
     let mut s = moonfire_ffmpeg::swscale::Scaler::new(par.dims(), scaled.dims()).unwrap();
+
     loop {
         let pkt = match input.read_frame() {
             Ok(p) => p,
@@ -153,6 +200,15 @@ fn process_recording(ctx: &Context<'_>, body: &[u8]) -> Result<(), Error> {
         interpreter.invoke().unwrap();
         ctx.interpreter_tx.try_send(interpreter).unwrap();
     }
+
+    let conn = ctx.conn.lock();
+    let mut stmt = conn.prepare_cached(r#"
+        insert into recording_object_detection (camera_uuid, stream_name, recording_id, frame_data)
+            values (?, ?, ?, ?)
+    "#)?;
+    let stream = streams[usize::try_from(recording.stream_i).unwrap()];
+    let u = stream.camera_uuid.as_bytes();
+    stmt.execute(params![&u[..], &stream.stream_name, &recording.id, &b""[..]])?;
     Ok(())
 }
 
@@ -160,6 +216,8 @@ fn main() -> Result<(), Error> {
     let mut h = moonfire_motion::init_logging();
     let _a = h.r#async();
     let opt = Opt::from_args();
+
+    let conn = parking_lot::Mutex::new(rusqlite::Connection::open(&opt.db)?);
 
     info!("Loading model");
     let m = moonfire_tflite::Model::from_static(moonfire_motion::MODEL).unwrap();
@@ -200,6 +258,7 @@ fn main() -> Result<(), Error> {
 
     let ctx = Context {
         client: moonfire_nvr_client::Client::new(opt.nvr, opt.cookie),
+        conn,
         interpreter_tx,
         interpreter_rx,
         width,
@@ -237,7 +296,7 @@ fn main() -> Result<(), Error> {
             let before = std::time::Instant::now();
             info!("Decoder thread starting");
             decode_rx.iter().par_bridge().try_for_each(|r: Recording| -> Result<(), Error> {
-                process_recording(&ctx, &r.body)?;
+                process_recording(&ctx, &streams, &r)?;
                 progress.inc(1);
                 Ok(())
             }).unwrap();
@@ -276,4 +335,14 @@ fn main() -> Result<(), Error> {
 
     progress.finish();
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    #[test]
+    fn filter() {
+        let mut from = vec![1, 3, 5, 10, 20];
+        super::filter_sorted(&mut from, [1, 2, 3, 8, 20].iter());
+        assert_eq!(&from, &[5, 10]);
+    }
 }
