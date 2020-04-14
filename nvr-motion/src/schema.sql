@@ -4,7 +4,9 @@ create table object_detection_model (
   name text not null,
 
   -- The actual model and label mappings, in a tbd protocol buffer message
-  -- format.
+  -- format. Currently one model is hardcoded so this column is left null.
+  -- The format should include both the actual model and a mapping
+  -- from the model's label ids to object_detection_label.uuid.
   data blob
 );
 
@@ -105,16 +107,42 @@ create table recording_object_detection (
   stream_name not null check (stream_name in ('main', 'sub')),
   recording_id integer not null,
 
-  -- repeated:
-  -- * frame delta unsigned varint
-  -- * label unsigned varint
-  -- * xmin, xmax, ymin, ymax as fixed 8-bit numbers
-  --   (any value from knowing xmin <= xmax, ymin <= ymax?
-  --   probably not a whole byte anyway.)
-  --   although 256/300 or 256/320 is not super clean. awkward.
-  -- * score/probability/whatever-it's-called as fixed 8-bit number
-  --   linear scale?
+  -- zstd-compressed:
+  --
+  -- * non-zero pts interval in 90k units, as an unsigned varint. For all
+  --   multiples of this number in [0, recording duration) the frame displayed
+  --   at that pts (relative to start of the recording) will be processed;
+  --   duplicates are suppressed.
+  --
+  --   Consider a 2-second recording at 4 fps with no jitter:
+  --   frame [0,     1,     2,     3,     4,      5,      6,      7]
+  --   pts   [0, 22500, 45000, 67500, 90000, 112500, 135000, 157500].
+  --
+  --   A pts interval of 30000 means process at 3 fps (90000 / 30000):
+  --   target pts [0, 30000, 60000, 90000, 120000, 150000]
+  --   frame      [0,     1,     2,     4,      5,      6]
+  --   frame pts  [0, 22500, 45000, 90000, 112500, 135000]
+  --
+  --   A pts interval of 18000 means process at 5 fps (90000 / 18000):
+  --   target pts [0, 18000, 36000, 54000, 72000, 90000, 108000, 126000, 144000, 162000]
+  --   frame      [0,    *0,     1,     2,     3,     4,     *4,      5,      6,      7]
+  --   frame pts  [0,    *0, 22500, 45000, 67500, 90000, *90000, 112500, 135000, 157500]
+  --   * indicates duplicate frames (suppressed).
+  --   In this case, every frame is processed. However, in real examples with
+  --   jitter, frames may be skipped even if the desired frame rate exceeds
+  --   the input data's frame rate.
+  --
+  --   A pts interval of 1 guarantees every frame is processed.
+  --
+  -- * one per processed frame (even if zero objects were detected):
+  --   * label count unsigned varint; for each:
+  --     * label unsigned varint, referencing object_detection_label.id.
+  --     * xmin, width, ymin, height as fixed 8-bit numbers
+  --     * score as fixed 8-bit number
   frame_data blob not null,
+
+  -- repeated delta of duration 90k, one per frame.
+  durations blob not null,
 
   -- Operations are almost always done on a bounded set of recordings, so
   -- and perhaps on all models. Use composite_id as the prefix of the primary

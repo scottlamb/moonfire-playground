@@ -29,6 +29,12 @@ struct Opt {
 
     #[structopt(short, long, parse(try_from_str))]
     end: Option<moonfire_nvr_client::Time>,
+
+    #[structopt(short="f", long)]
+    fps: Option<f32>,
+
+    #[structopt(short="C", long, use_delimiter=true)]
+    cameras: Option<Vec<String>>,
 }
 
 struct Context<'a> {
@@ -38,6 +44,7 @@ struct Context<'a> {
     client: moonfire_nvr_client::Client,
     start: Option<moonfire_nvr_client::Time>,
     end: Option<moonfire_nvr_client::Time>,
+    cameras: Option<Vec<String>>,
 
     // Stuff for processing recordings.
     // This supports using multiple interpreters, one per Edge TPU device.
@@ -46,6 +53,7 @@ struct Context<'a> {
     interpreter_rx: crossbeam::channel::Receiver<moonfire_tflite::Interpreter<'a>>,
     width: usize,
     height: usize,
+    min_interval_90k: i32,
 }
 
 /// Gets the id range of committed recordings indicated by `r`.
@@ -80,6 +88,11 @@ async fn list_recordings(ctx: &Context<'_>) -> Result<Vec<Option<(Stream, Vec<i3
 async fn process_camera(ctx: &Context<'_>, camera: &moonfire_nvr_client::Camera)
                         -> Result<Option<(Stream, Vec<i32>)>, Error> {
     const DESIRED_STREAM: &str = "sub";
+    if let Some(cameras) = &ctx.cameras {
+        if !cameras.contains(&camera.short_name) {
+            return Ok(None);
+        }
+    }
     if !camera.streams.contains_key(DESIRED_STREAM) {
         return Ok(None);
     }
@@ -156,6 +169,63 @@ async fn fetch_recording(ctx: &Context<'_>, stream: &Stream, id: i32)
     Ok(resp.bytes().await?)
 }
 
+pub fn zigzag32(i: i32) -> u32 { ((i << 1) as u32) ^ ((i >> 31) as u32) }
+
+pub fn append_varint32(i: u32, data: &mut Vec<u8>) {
+    if i < 1u32 << 7 {
+        data.push(i as u8);
+    } else if i < 1u32 << 14 {
+        data.extend_from_slice(&[(( i        & 0x7F) | 0x80) as u8,
+                                   (i >>  7)                 as u8]);
+    } else if i < 1u32 << 21 {
+        data.extend_from_slice(&[(( i        & 0x7F) | 0x80) as u8,
+                                 (((i >>  7) & 0x7F) | 0x80) as u8,
+                                   (i >> 14)                 as u8]);
+    } else if i < 1u32 << 28 {
+        data.extend_from_slice(&[(( i        & 0x7F) | 0x80) as u8,
+                                 (((i >>  7) & 0x7F) | 0x80) as u8,
+                                 (((i >> 14) & 0x7F) | 0x80) as u8,
+                                   (i >> 21)                 as u8]);
+    } else {
+        data.extend_from_slice(&[(( i        & 0x7F) | 0x80) as u8,
+                                 (((i >>  7) & 0x7F) | 0x80) as u8,
+                                 (((i >> 14) & 0x7F) | 0x80) as u8,
+                                 (((i >> 21) & 0x7F) | 0x80) as u8,
+                                   (i >> 28)                 as u8]);
+    }
+}
+
+const SCORE_THRESHOLD: f32 = 0.5;
+
+fn normalize(v: f32) -> u8 {
+    (v.max(0.).min(1.0) * 255.) as u8
+}
+
+pub fn append_frame(interpreter: &moonfire_tflite::Interpreter<'_>, data: &mut Vec<u8>) {
+    let outputs = interpreter.outputs();
+    let boxes = outputs[0].f32s();
+    let classes = outputs[1].f32s();
+    let scores = outputs[2].f32s();
+    let num_labels = scores.iter().filter(|&&s| s >= SCORE_THRESHOLD).count();
+    append_varint32(u32::try_from(num_labels).unwrap(), data);
+    for (i, &score) in scores.iter().enumerate() {
+        if score < SCORE_THRESHOLD {
+            continue;
+        }
+        let box_ = &boxes[4*i..4*i+4];
+        let y = normalize(box_[0]);
+        let x = normalize(box_[1]);
+        let h = normalize(box_[2] - box_[0]);
+        let w = normalize(box_[3] - box_[1]);
+        append_varint32(classes[i] as u32, data);
+        data.push(x);
+        data.push(w);
+        data.push(y);
+        data.push(h);
+        data.push(normalize(scores[i]));
+    }
+}
+
 fn process_recording(ctx: &Context<'_>, streams: &Vec<&Stream>, recording: &Recording)
                      -> Result<(), Error> {
     let mut open_options = moonfire_ffmpeg::avutil::Dictionary::new();
@@ -182,6 +252,11 @@ fn process_recording(ctx: &Context<'_>, streams: &Vec<&Stream>, recording: &Reco
     let mut f = VideoFrame::empty().unwrap();
     let mut s = moonfire_ffmpeg::swscale::Scaler::new(par.dims(), scaled.dims()).unwrap();
 
+    let mut frame_data = Vec::with_capacity(4096);
+    let mut durations = Vec::with_capacity(4096);
+    let mut last_duration = 0;
+    let mut next_pts = 0;
+    append_varint32(u32::try_from(ctx.min_interval_90k).unwrap(), &mut frame_data);
     loop {
         let pkt = match input.read_frame() {
             Ok(p) => p,
@@ -194,21 +269,43 @@ fn process_recording(ctx: &Context<'_>, streams: &Vec<&Stream>, recording: &Reco
         if !d.decode_video(&pkt, &mut f).unwrap() {
             continue;
         }
+        let d = pkt.duration();
+        append_varint32(zigzag32(d.checked_sub(last_duration).unwrap()), &mut durations);
+        last_duration = d;
+        let pts = pkt.pts().unwrap();
+        match pts.cmp(&next_pts) {
+            std::cmp::Ordering::Less => continue,
+            std::cmp::Ordering::Equal => {},
+            std::cmp::Ordering::Greater => {
+                // works for non-negative values.
+                fn ceil_div(a: i64, b: i64) -> i64 { (a + b - 1) / b }
+                let i = i64::from(ctx.min_interval_90k);
+                let before = next_pts;
+                next_pts = ceil_div(pts, i) * i;
+                assert!(next_pts >= pts, "next_pts {}->{} pts {} interval {}",
+                        before, next_pts, pts, i);
+            },
+        }
+
+        // Perform object detection on the frame.
         s.scale(&f, &mut scaled);
         let mut interpreter = ctx.interpreter_rx.recv().unwrap();
         moonfire_motion::copy(&scaled, &mut interpreter.inputs()[0]);
         interpreter.invoke().unwrap();
+        append_frame(&interpreter, &mut frame_data);
         ctx.interpreter_tx.try_send(interpreter).unwrap();
     }
+    let compressed = zstd::stream::encode_all(&frame_data[..], 22)?;
 
     let conn = ctx.conn.lock();
     let mut stmt = conn.prepare_cached(r#"
-        insert into recording_object_detection (camera_uuid, stream_name, recording_id, frame_data)
-            values (?, ?, ?, ?)
+        insert into recording_object_detection (camera_uuid, stream_name, recording_id, frame_data,
+                                                durations)
+            values (?, ?, ?, ?, ?)
     "#)?;
     let stream = streams[usize::try_from(recording.stream_i).unwrap()];
     let u = stream.camera_uuid.as_bytes();
-    stmt.execute(params![&u[..], &stream.stream_name, &recording.id, &b""[..]])?;
+    stmt.execute(params![&u[..], &stream.stream_name, &recording.id, &compressed, &durations])?;
     Ok(())
 }
 
@@ -256,6 +353,13 @@ fn main() -> Result<(), Error> {
         interpreter_tx.try_send(i).unwrap();
     }
 
+    let min_interval_90k = match opt.fps {
+        None => 1,
+        Some(f) if f > 0. => (90000. / f) as i32,
+        Some(_) => panic!("interval fps; must be non-negative"),
+    };
+    assert!(min_interval_90k > 0);
+
     let ctx = Context {
         client: moonfire_nvr_client::Client::new(opt.nvr, opt.cookie),
         conn,
@@ -265,6 +369,8 @@ fn main() -> Result<(), Error> {
         height,
         start: opt.start,
         end: opt.end,
+        cameras: opt.cameras,
+        min_interval_90k,
     };
 
     let _ffmpeg = moonfire_ffmpeg::Ffmpeg::new();
