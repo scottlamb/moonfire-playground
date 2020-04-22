@@ -4,9 +4,7 @@ use std::collections::BTreeMap;
 use log::debug;
 use uuid::Uuid;
 
-mod recording;
-
-pub use recording::{Time, Duration};
+pub use moonfire_base::time::{Time, Duration};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all="camelCase")]
