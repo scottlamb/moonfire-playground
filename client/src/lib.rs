@@ -74,7 +74,7 @@ pub struct ListRecordings {
     pub recordings: Vec<Recording>,
 
     #[serde(default)]
-    pub video_sample_entries: Vec<VideoSampleEntry>,
+    pub video_sample_entries: BTreeMap<i32, VideoSampleEntry>,
 }
 
 #[derive(Debug, Deserialize)]

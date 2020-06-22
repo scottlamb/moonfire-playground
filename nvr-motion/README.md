@@ -44,6 +44,26 @@ cd ~/git/moonfire-playground/nvr-motion
 cargo build --release
 ```
 
+To run the backfill command, create a dummy database:
+
+```
+sqlite3 mydb < src/schema.sql
+```
+
+Create a suitable Moonfire NVR cookie via:
+
+```
+sudo -u moonfire-nvr nvr login --permissions='view_video: true' $USER
+```
+
+and pass it (`s=` and onward) to backfill's `cookie` argument.
+
+```
+RUST_BACKTRACE=1 target/release/backfill --db=./mydb --cookie=s=... --nvr=http://localhost:8080
+```
+
+Currently expects a Moonfire NVR from the `new-schema` branch (not `master`).
+
 ## Future Work
 
 I'd like this to be a processor that connects to Moonfire NVR, subscribes to

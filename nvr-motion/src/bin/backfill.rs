@@ -9,7 +9,7 @@ use moonfire_ffmpeg::avutil::VideoFrame;
 use rayon::prelude::*;
 use rusqlite::params;
 use std::convert::TryFrom;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 use structopt::StructOpt;
 use uuid::Uuid;
 
@@ -54,6 +54,7 @@ struct Context<'a> {
     width: usize,
     height: usize,
     min_interval_90k: i32,
+    frames_processed: AtomicUsize,
 }
 
 /// Gets the id range of committed recordings indicated by `r`.
@@ -292,6 +293,7 @@ fn process_recording(ctx: &Context<'_>, streams: &Vec<&Stream>, recording: &Reco
         let mut interpreter = ctx.interpreter_rx.recv().unwrap();
         moonfire_motion::copy(&scaled, &mut interpreter.inputs()[0]);
         interpreter.invoke().unwrap();
+        ctx.frames_processed.fetch_add(1, Ordering::Relaxed);
         append_frame(&interpreter, &mut frame_data);
         ctx.interpreter_tx.try_send(interpreter).unwrap();
     }
@@ -371,6 +373,7 @@ fn main() -> Result<(), Error> {
         end: opt.end,
         cameras: opt.cameras,
         min_interval_90k,
+        frames_processed: AtomicUsize::new(0),
     };
 
     let _ffmpeg = moonfire_ffmpeg::Ffmpeg::new();
@@ -392,10 +395,12 @@ fn main() -> Result<(), Error> {
         .with_style(indicatif::ProgressStyle::default_bar()
             .template("[{eta_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")
             .progress_chars("##-")));
+    progress.enable_steady_tick(100);
 
     let (decode_tx, decode_rx) = crossbeam::channel::bounded(16);
     let mut decode_tx = Some(decode_tx);
 
+    let start = std::time::Instant::now();
     rayon::scope(|s| {
         // Decoder threads.
         s.spawn(|_| {
@@ -403,6 +408,9 @@ fn main() -> Result<(), Error> {
             info!("Decoder thread starting");
             decode_rx.iter().par_bridge().try_for_each(|r: Recording| -> Result<(), Error> {
                 process_recording(&ctx, &streams, &r)?;
+                let frames_processed = ctx.frames_processed.load(Ordering::Relaxed);
+                let elapsed = std::time::Instant::now() - start;
+                info!("rate = {:.1} fps", frames_processed as f32 / elapsed.as_secs_f32());
                 progress.inc(1);
                 Ok(())
             }).unwrap();
