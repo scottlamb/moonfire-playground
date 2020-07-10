@@ -1,6 +1,6 @@
-A crude attempt at on-camera motion detection. Needs a Moonfire NVR
-installation on the `new-schema` branch. The database must be populated with
-signals of the following types:
+A crude attempt at on-camera analytics (such as motion detection). Needs a
+Moonfire NVR installation on the `new-schema` branch. The database must be
+populated with signals of the following types:
 
 | watcher type          | uuid                                   |
 | --------------------- | -------------------------------------- |

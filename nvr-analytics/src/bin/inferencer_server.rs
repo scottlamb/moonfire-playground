@@ -20,7 +20,7 @@ struct MyInferencer {
 impl MyInferencer {
     fn new(delegate: Option<&'static moonfire_tflite::Delegate>)
            -> Result<Self, BoxedError> {
-        let m = moonfire_tflite::Model::from_static(moonfire_motion::MODEL).unwrap();
+        let m = moonfire_tflite::Model::from_static(nvr_analytics::MODEL).unwrap();
         let mut builder = moonfire_tflite::Interpreter::builder();
         if let Some(d) = delegate {
             builder.add_delegate(d);
@@ -37,7 +37,7 @@ impl MyInferencer {
             height: 300,
         });
         model.labels = HashMap::new();
-        for (i, l) in moonfire_motion::LABELS.iter().enumerate() {
+        for (i, l) in nvr_analytics::LABELS.iter().enumerate() {
             if let Some(l) = l {
                 model.labels.insert(u32::try_from(i).unwrap(), l.to_string());
             }

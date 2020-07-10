@@ -40,7 +40,7 @@ bazel build -c opt //tensorflow/lite/c:tensorflowlite_c
 sudo install -m 755 bazel-bin/tensorflow/lite/c/libtensorflowlite_c.so /usr/local/lib
 sudo ldconfig
 
-cd ~/git/moonfire-playground/nvr-motion
+cd ~/git/moonfire-playground/nvr-analytics
 cargo build --release
 ```
 

@@ -1,5 +1,4 @@
-/camera-motion/target
+/camera-analytics/target
 /client/target
-/nvr-motion/ffmpeg/target
-/nvr-motion/target
+/nvr-analytics/target
 /onvif/target

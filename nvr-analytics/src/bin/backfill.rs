@@ -291,7 +291,7 @@ fn process_recording(ctx: &Context<'_>, streams: &Vec<&Stream>, recording: &Reco
         // Perform object detection on the frame.
         s.scale(&f, &mut scaled);
         let mut interpreter = ctx.interpreter_rx.recv().unwrap();
-        moonfire_motion::copy(&scaled, &mut interpreter.inputs()[0]);
+        nvr_analytics::copy(&scaled, &mut interpreter.inputs()[0]);
         interpreter.invoke().unwrap();
         ctx.frames_processed.fetch_add(1, Ordering::Relaxed);
         append_frame(&interpreter, &mut frame_data);
@@ -312,14 +312,14 @@ fn process_recording(ctx: &Context<'_>, streams: &Vec<&Stream>, recording: &Reco
 }
 
 fn main() -> Result<(), Error> {
-    let mut h = moonfire_motion::init_logging();
+    let mut h = nvr_analytics::init_logging();
     let _a = h.async_scope();
     let opt = Opt::from_args();
 
     let conn = parking_lot::Mutex::new(rusqlite::Connection::open(&opt.db)?);
 
     info!("Loading model");
-    let m = moonfire_tflite::Model::from_static(moonfire_motion::MODEL).unwrap();
+    let m = moonfire_tflite::Model::from_static(nvr_analytics::MODEL).unwrap();
     info!("Creating interpreters");
     let devices = moonfire_tflite::edgetpu::Devices::list();
     if devices.is_empty() {

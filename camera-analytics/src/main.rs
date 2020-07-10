@@ -49,8 +49,8 @@ use uuid::Uuid;
 
 const USAGE: &'static str = "
 Usage:
-  camera-motion [--cookie=COOKIE] --nvr=URL
-  camera-motion (-h | --help)
+  camera-analytics [--cookie=COOKIE] --nvr=URL
+  camera-analytics (-h | --help)
 ";
 
 fn retry_forever<F>(name: String, mut f: F)

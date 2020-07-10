@@ -1,5 +1,5 @@
 [package]
-name = "camera-motion"
+name = "camera-analytics"
 version = "0.1.0"
 authors = ["Scott Lamb <slamb@slamb.org>"]
 edition = "2018"

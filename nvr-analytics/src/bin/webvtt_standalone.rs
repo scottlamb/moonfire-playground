@@ -47,7 +47,7 @@ fn write_objs(mut stdout: &mut dyn Write, start: Pts, end: Pts, objs: &[Object])
 }
 
 fn main() {
-    let m = moonfire_tflite::Model::from_static(moonfire_motion::MODEL).unwrap();
+    let m = moonfire_tflite::Model::from_static(nvr_analytics::MODEL).unwrap();
     let delegate;
     let mut builder = moonfire_tflite::Interpreter::builder();
     let devices = moonfire_tflite::edgetpu::Devices::list();

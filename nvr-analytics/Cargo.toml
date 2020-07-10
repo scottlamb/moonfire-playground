@@ -1,5 +1,5 @@
 [package]
-name = "moonfire-motion"
+name = "nvr-analytics"
 version = "0.1.0"
 authors = ["Scott Lamb <slamb@slamb.org>"]
 edition = "2018"
