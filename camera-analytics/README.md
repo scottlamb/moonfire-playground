@@ -47,15 +47,15 @@ $ moonfire-nvr login --permissions='read_camera_configs: true
 Save the output line that starts with `s=`; pass it via the `--cookie`
 commandlne argument.
 
-Example `/etc/systemd/system/camera-motion.service` file:
+Example `/etc/systemd/system/camera-analytics.service` file:
 
 ```
 Unit]
-Description=Moonfire NVR on-camera motion detection
+Description=Moonfire NVR on-camera analytics
 After=moonfire-nvr.target
 
 [Service]
-ExecStart=/usr/local/bin/camera-motion \
+ExecStart=/usr/local/bin/camera-analytics \
     --cookie=s=... \
     --nvr=https:/...
 Environment=MOONFIRE_FORMAT=google-systemd
@@ -74,6 +74,6 @@ Enable via
 
 ```
 $ sudo systemctl daemon-reload
-$ sudo systemctl start camera-motion
-$ sudo systemctl enable camera-motion
+$ sudo systemctl start camera-analytics
+$ sudo systemctl enable camera-analytics
 ```
