@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 pub use moonfire_base::time::{Time, Duration};
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct TopLevel {
     pub time_zone_name: String,
@@ -16,14 +16,14 @@ pub struct TopLevel {
     pub signal_types: Vec<SignalType>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct Session {
     pub username: String,
     pub csrf: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct Camera {
     pub uuid: Uuid,
@@ -33,7 +33,7 @@ pub struct Camera {
     pub streams: BTreeMap<String, Stream>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct CameraConfig {
     pub onvif_host: Option<String>,
@@ -41,7 +41,7 @@ pub struct CameraConfig {
     pub password: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct Stream {
     pub retain_bytes: i64,
@@ -51,9 +51,16 @@ pub struct Stream {
     pub total_sample_file_bytes: i64,
 
     pub days: Option<BTreeMap<String, StreamDayValue>>,
+    pub config: Option<StreamConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all="camelCase")]
+pub struct StreamConfig {
+    pub rtsp_url: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct StreamDayValue {
     pub start_time_90k: i64,
@@ -68,7 +75,7 @@ pub struct ListRecordingsRequest<'a> {
     pub end: Option<Time>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct ListRecordings {
     pub recordings: Vec<Recording>,
@@ -77,7 +84,7 @@ pub struct ListRecordings {
     pub video_sample_entries: BTreeMap<i32, VideoSampleEntry>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct Recording {
     pub start_time_90k: i64,
@@ -94,7 +101,7 @@ pub struct Recording {
     pub growing: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct VideoSampleEntry {
     pub width: u16,
@@ -125,7 +132,7 @@ pub struct ViewRequest<'a> {
     pub ts: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct Signal {
     pub id: u32,
@@ -135,14 +142,14 @@ pub struct Signal {
     pub short_name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct SignalType {
     pub uuid: Uuid,
     pub states: Vec<SignalTypeState>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct SignalTypeState {
     pub value: u16,
@@ -175,7 +182,7 @@ pub struct PostSignalsRequest<'a> {
     pub rel_end_time_90k: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct PostSignalsResponse {
     pub time_90k: i64,

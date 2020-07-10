@@ -50,12 +50,11 @@
 
 use bytes::{BufMut, BytesMut};
 use crate::multipart::{Part, foreach_part};
-use crate::nvr;
 use failure::{bail, format_err, Error};
-use http::header::{self, HeaderValue};
-use mime;
-use reqwest::Client;
+use reqwest::blocking::Client;
+use reqwest::header::{self, HeaderValue};
 use reqwest::Url;
+use mime;
 use std::io::Write;
 use std::time::{Duration, Instant};
 use xml;
@@ -80,14 +79,14 @@ pub struct Watcher {
     client: Client,
     url: Url,
     auth: HeaderValue,
-    nvr: &'static nvr::Client,
+    nvr: &'static moonfire_nvr_client::Client,
     signal_id: u32,
     status: Option<Status>,
 }
 
 impl Watcher {
-    pub fn new(name: String, config: &nvr::CameraConfig, nvr: &'static nvr::Client, signal_id: u32)
-               -> Result<Self, Error> {
+    pub fn new(name: String, config: &moonfire_nvr_client::CameraConfig,
+               nvr: &'static moonfire_nvr_client::Client, signal_id: u32) -> Result<Self, Error> {
         // TODO: is there a separate connect timeout?
         let client = Client::builder()
             .timeout(Some(IO_TIMEOUT))
@@ -104,10 +103,8 @@ impl Watcher {
             status: None,
         })
     }
-}
 
-impl super::Watcher for Watcher {
-    fn watch_once(&mut self) -> Result<(), Error> {
+    pub fn watch_once(&mut self) -> Result<(), Error> {
         debug!("{}: watch_once call; url: {}", self.name, self.url);
         let mut resp = self.client.get(self.url.clone())
                                   .header(header::AUTHORIZATION, &self.auth)
@@ -150,7 +147,8 @@ impl super::Watcher for Watcher {
                     motion,
                     as_of: now,
                 });
-                self.nvr.update_signals(&[self.signal_id], &[if motion { 2 } else { 1 }])?;
+                futures::executor::block_on(
+                    self.nvr.update_signals(&[self.signal_id], &[if motion { 2 } else { 1 }]))?;
             }
             Ok(())
         })
@@ -226,7 +224,7 @@ fn basic_auth(username: &str, password: &str) -> HeaderValue {
         e.write_all(password.as_bytes()).unwrap();
         e.finish().unwrap();
     }
-    HeaderValue::from_shared(w.into_inner().freeze()).unwrap()
+    HeaderValue::from_maybe_shared(w.into_inner().freeze()).unwrap()
 }
 
 #[cfg(test)]

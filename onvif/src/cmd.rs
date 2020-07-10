@@ -80,6 +80,13 @@ const SET_METADATA_CONFIGURATION_HIKVISION: &'static str = r#"
     </media:SetMetadataConfiguration>
 "#;
 
+const ADD_METADATA_CONFIGURATION: &'static str = r#"
+    <media:AddMetadataConfiguration>
+      <media:ProfileToken>Profile_1</media:ProfileToken>
+      <media:ConfigurationToken>MetaDataToken</media:ConfigurationToken>
+    </media:AddMetadataConfiguration>
+"#;
+
 fn base64_to(from: &[u8], to: &mut [u8]) {
     let len = base64::encode_config_slice(from, base64::STANDARD, to);
     assert_eq!(to.len(), len);
@@ -279,7 +286,7 @@ pub fn get_metadata_configurations(cli: &reqwest::Client, media_url: Url, t: &Us
 fn set_metadata_configuration_request(t: &UsernameToken) -> Result<String, Error> {
     let mut s = String::new();
     write_header(&mut s, t)?;
-    s.push_str(SET_METADATA_CONFIGURATION_DAHUA);
+    s.push_str(SET_METADATA_CONFIGURATION_HIKVISION);
     write_footer(&mut s)?;
     Ok(s)
 }
@@ -293,6 +300,31 @@ pub fn set_metadata_configuration(cli: &reqwest::Client, media_url: Url, t: &Use
         .header(
             "Soapaction",
             "\"http://www.onvif.org/ver10/media/wsdl/SetMetadataConfiguration\"",
+        )
+        .body(body)
+        .send()?
+        .error_for_status()?;
+    let resp_text = resp.text()?;
+    Ok(resp_text)
+}
+
+fn add_metadata_configuration_request(t: &UsernameToken) -> Result<String, Error> {
+    let mut s = String::new();
+    write_header(&mut s, t)?;
+    s.push_str(ADD_METADATA_CONFIGURATION);
+    write_footer(&mut s)?;
+    Ok(s)
+}
+
+// TODO: response proto.
+pub fn add_metadata_configuration(cli: &reqwest::Client, media_url: Url, t: &UsernameToken) -> Result<String, Error> {
+    let body = add_metadata_configuration_request(t)?;
+    let mut resp = cli
+        .post(media_url)
+        .header("Content-Type", "application/soap+xml")
+        .header(
+            "Soapaction",
+            "\"http://www.onvif.org/ver10/media/wsdl/AddMetadataConfiguration\"",
         )
         .body(body)
         .send()?

@@ -98,11 +98,11 @@ fn main() {
     let username: &str = args.get_str("--username");
     let password: &str = args.get_str("--password");
 
-    let mut s =
-        Subscription::new(base_url.clone(), username.to_owned(), password.to_owned()).unwrap();
-    for _ in 0..10 {
-        dbg!(s.pull().unwrap());
-    }
+    //let mut s =
+    //    Subscription::new(base_url.clone(), username.to_owned(), password.to_owned()).unwrap();
+    //for _ in 0..10 {
+    //    dbg!(s.pull().unwrap());
+    //}
 
     let client = reqwest::Client::builder()
         .build().unwrap();
@@ -112,8 +112,10 @@ fn main() {
                               &cmd::UsernameToken::new(username, password)).unwrap();
     dbg!(&get_cap_resp);
     ensure_url_within_base(&mut get_cap_resp.media_url, &base_url).unwrap();
-    println!("{}", cmd::get_metadata_configurations(&client, get_cap_resp.media_url.clone(),
-                                                   &cmd::UsernameToken::new(username, password)).unwrap());
-    println!("{}", cmd::set_metadata_configuration(&client, get_cap_resp.media_url,
-                                                   &cmd::UsernameToken::new(username, password)).unwrap());
+    //println!("{}", cmd::get_metadata_configurations(&client, get_cap_resp.media_url.clone(),
+    //                                               &cmd::UsernameToken::new(username, password)).unwrap());
+    //println!("{}", cmd::set_metadata_configuration(&client, get_cap_resp.media_url,
+    //                                               &cmd::UsernameToken::new(username, password)).unwrap());
+    //println!("{}", cmd::add_metadata_configuration(&client, get_cap_resp.media_url.clone(),
+    //                                               &cmd::UsernameToken::new(username, password)).unwrap());
 }

@@ -2,10 +2,11 @@ A crude attempt at on-camera motion detection. Needs a Moonfire NVR
 installation on the `new-schema` branch. The database must be populated with
 signals of the following types:
 
-| brand     | uuid   |
-| --------- | ------ |
-| hikvision | 18bf0756-2120-4fbc-99d1-a367b10ef297 |
-| dahua     | ee66270f-d9c6-4819-8b33-9720d4cbca6b |
+| watcher type          | uuid                                   |
+| --------------------- | -------------------------------------- |
+| rtsp metadata stream  | `5684523f-f29d-42e9-b6af-1e123f2b76fb` |
+| hikvision proprietary | `18bf0756-2120-4fbc-99d1-a367b10ef297` |
+| dahua proprietary     | `ee66270f-d9c6-4819-8b33-9720d4cbca6b` |
 
 as by running `moonfire-nvr sql` with the following SQL that assumes the camera
 called `driveway` is a Dahua and the others are Hikvisions:

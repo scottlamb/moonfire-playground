@@ -313,7 +313,7 @@ fn process_recording(ctx: &Context<'_>, streams: &Vec<&Stream>, recording: &Reco
 
 fn main() -> Result<(), Error> {
     let mut h = moonfire_motion::init_logging();
-    let _a = h.r#async();
+    let _a = h.async_scope();
     let opt = Opt::from_args();
 
     let conn = parking_lot::Mutex::new(rusqlite::Connection::open(&opt.db)?);
@@ -332,7 +332,7 @@ fn main() -> Result<(), Error> {
         .map_err(|()| format_err!("Unable to create delegate"))?;
     let mut interpreters = delegates.iter().map(|d| {
         let mut builder = moonfire_tflite::Interpreter::builder();
-        builder.add_delegate(d);
+        builder.add_borrowed_delegate(d);
         builder.build(&m)
     }).collect::<Result<Vec<_>, ()>>().map_err(|()| format_err!("Unable to build interpreter"))?;
     info!("Done creating {} interpreters", interpreters.len());

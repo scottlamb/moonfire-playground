@@ -29,7 +29,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use failure::{bail, format_err, Error};
-use http::header::{self, HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{self, HeaderMap, HeaderName, HeaderValue};
 use httparse;
 use mime;
 use std::io::Read;
@@ -51,10 +51,10 @@ pub struct Part<'a> {
 ///
 /// * `expected_subtype` should be the expected multipart subtype: `mixed` or `x-mixed-replace`.
 /// * `separator` is the newlines (if any) to expect between parts.
-pub fn foreach_part<F>(r: &mut reqwest::Response, expected_subtype: &str, separator: &str,
-                       f: F) -> Result<(), Error>
+pub fn foreach_part<F>(r: &mut reqwest::blocking::Response, expected_subtype: &str,
+                       separator: &str, f: F) -> Result<(), Error>
 where F: FnMut(Part) -> Result<(), Error> {
-    if r.status() != http::status::StatusCode::OK {
+    if r.status() != reqwest::StatusCode::OK {
         bail!("non-okay status: {:?}", r.status());
     }
     let m: mime::Mime = r.headers().get(header::CONTENT_TYPE)

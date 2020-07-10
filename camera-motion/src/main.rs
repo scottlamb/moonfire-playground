@@ -28,6 +28,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+#[macro_use] extern crate cstr;
 #[macro_use] extern crate lazy_static;
 #[macro_use] extern crate log;
 #[cfg_attr(test, macro_use)] extern crate serde_json;
@@ -35,28 +36,16 @@
 mod dahua;
 mod hikvision;
 mod multipart;
-mod nvr;
+mod rtsp;
 
 use docopt::Docopt;
 use failure::Error;
 use fnv::FnvHashMap;
-use http::header::HeaderValue;
+use reqwest::header::HeaderValue;
 use reqwest::Url;
-use std::thread;
+use std::future::Future;
+use std::str::FromStr;
 use uuid::Uuid;
-
-/*const HIK_CAMERAS: [(&'static str, &'static str, ); 5] = [
-    // name       ip                signal_id
-    ("back_west", "192.168.5.101",  1),
-    ("back_east", "192.168.5.102",  2),
-    ("courtyard", "192.168.5.103",  3),
-    ("west_side", "192.168.5.104",  4),
-    ("garage",    "192.168.5.106",  5),
-];
-
-const DAHUA_CAMERAS: [(&'static str, &'static str); 1] = [
-    ("driveway",    "192.168.5.108", 6),
-];*/
 
 const USAGE: &'static str = "
 Usage:
@@ -64,33 +53,23 @@ Usage:
   camera-motion (-h | --help)
 ";
 
-trait Watcher {
-    fn watch_once(&mut self) -> Result<(), Error> ;
-}
-
-fn watch_forever(name: String, w: &mut dyn Watcher) {
+fn retry_forever<F>(name: String, mut f: F)
+where F: FnMut() -> Result<(), Error> {
     loop {
-        if let Err(e) = w.watch_once() {
-            error!("{}: {}", &name, e);
+        if let Err(e) = f() {
+            error!("{}: {:?}", &name, e);
             std::thread::sleep(std::time::Duration::from_secs(5));
         }
     }
 }
 
-fn parse_fmt<S: AsRef<str>>(fmt: S) -> Option<mylog::Format> {
-    match fmt.as_ref() {
-        "google" => Some(mylog::Format::Google),
-        "google-systemd" => Some(mylog::Format::GoogleSystemd),
-        _ => None,
-    }
-}
-
 /// Retries HTTP and server errors for a while.
-fn retry_http<T>(desc: &str, mut f: impl FnMut() -> Result<T, Error>) -> Result<T, Error> {
+async fn retry_http<T, F>(desc: &str, mut f: impl FnMut() -> F) -> Result<T, Error>
+where F: Future<Output = Result<T, Error>> {
     const MAX_ATTEMPTS: usize = 60;
     let mut attempt = 1;
     loop {
-        let e = match f() {
+        let e = match f().await {
             Ok(t) => return Ok(t),
             Err(e) => e,
         };
@@ -98,7 +77,7 @@ fn retry_http<T>(desc: &str, mut f: impl FnMut() -> Result<T, Error>) -> Result<
             None => return Err(e),
             Some(e) => e,
         };
-        if !re.is_http() && !re.is_server_error() {
+        if matches!(re.status(), Some(s) if s.is_client_error()) {
             return Err(e);
         }
         warn!("{}: attempt {}/{}: {}", desc, attempt, MAX_ATTEMPTS, e);
@@ -113,8 +92,8 @@ fn retry_http<T>(desc: &str, mut f: impl FnMut() -> Result<T, Error>) -> Result<
 fn init_logging() -> mylog::Handle {
     let h = mylog::Builder::new()
         .set_format(::std::env::var("MOONFIRE_FORMAT")
-                    .ok()
-                    .and_then(parse_fmt)
+                    .map_err(|_| ())
+                    .and_then(|s| mylog::Format::from_str(&s))
                     .unwrap_or(mylog::Format::Google))
         .set_spec(&::std::env::var("MOONFIRE_LOG").unwrap_or("info".to_owned()))
         .build();
@@ -122,53 +101,66 @@ fn init_logging() -> mylog::Handle {
     h
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let mut h = init_logging();
-    let _a = h.r#async();
+    let _a = h.async_scope();
     let args = Docopt::new(USAGE).and_then(|d| d.parse()).unwrap_or_else(|e| e.exit());
     let cookie = args.find("--cookie")
                      .map(|v| HeaderValue::from_str(v.as_str()).unwrap());
     let nvr = Url::parse(args.get_str("--nvr")).unwrap();
-    let nvr = Box::leak(Box::new(nvr::Client::new(nvr, cookie)));
+    let nvr: &'static _ = Box::leak(Box::new(moonfire_nvr_client::Client::new(nvr, cookie)));
     let top_level = retry_http("get camera configs from nvr",
-                               || nvr.top_level(&nvr::TopLevelRequest {
+                               || nvr.top_level(&moonfire_nvr_client::TopLevelRequest {
         days: false,
         camera_configs: true,
-    })).unwrap();
-    let mut threads = Vec::new();
+    })).await.unwrap();
 
     let dahua_uuid = Uuid::parse_str("ee66270f-d9c6-4819-8b33-9720d4cbca6b").unwrap();
     let hikvision_uuid = Uuid::parse_str("18bf0756-2120-4fbc-99d1-a367b10ef297").unwrap();
+    let rtsp_uuid = Uuid::parse_str("5684523f-f29d-42e9-b6af-1e123f2b76fb").unwrap();
 
-    let mut cameras_by_uuid =
+    let mut cameras_by_uuid: FnvHashMap<_, moonfire_nvr_client::Camera> =
         FnvHashMap::with_capacity_and_hasher(top_level.cameras.len(), Default::default());
     for c in &top_level.cameras {
-        cameras_by_uuid.insert(c.uuid, c);
+        cameras_by_uuid.insert(c.uuid, (*c).clone());
     }
+    let cameras_by_uuid: &'static _ = Box::leak(Box::new(cameras_by_uuid));
+    let mut handles = Vec::new();
     for s in &top_level.signals {
         let c = match cameras_by_uuid.get(&s.source) {
             None => continue,
             Some(c) => c,
         };
-        let config = c.config.as_ref().unwrap();
-        if s.type_ == dahua_uuid {
+        let s_id = s.id;
+        if s.type_ == rtsp_uuid {
             let name = c.short_name.clone();
-            let mut w = dahua::Watcher::new(name.clone(), config, nvr, s.id).unwrap();
-            info!("starting thread for dahua camera {}", &name);
-            threads.push(thread::Builder::new().name(name.clone())
-                                               .spawn(move || watch_forever(name, &mut w))
-                                               .expect("can't create thread"));
+            info!("watching rtsp camera {}", &name);
+            handles.push(tokio::task::spawn_blocking({
+                let nvr = nvr.clone();
+                move || {
+                    let mut w = rtsp::Watcher::new(name.clone(), c, nvr, s_id).unwrap();
+                    retry_forever(name, move || w.watch_once());
+                }
+            }));
+        } else if s.type_ == dahua_uuid {
+            let name = c.short_name.clone();
+            info!("watching dahua camera {}", &name);
+            handles.push(tokio::task::spawn_blocking(move || {
+                let mut w = dahua::Watcher::new(
+                    name.clone(), c.config.as_ref().unwrap(), nvr, s_id).unwrap();
+                retry_forever(name, move || w.watch_once());
+            }));
         } else if s.type_ == hikvision_uuid {
             let name = c.short_name.clone();
-            let mut w = hikvision::Watcher::new(name.clone(), config, nvr, s.id).unwrap();
-            info!("starting thread for hikvision camera {}", &name);
-            threads.push(thread::Builder::new().name(name.clone())
-                                               .spawn(move || watch_forever(name, &mut w))
-                                               .expect("can't create thread"));
+            info!("watching hikvision camera {}", &name);
+            handles.push(tokio::task::spawn_blocking(move || {
+                let mut w = hikvision::Watcher::new(
+                    name.clone(), c.config.as_ref().unwrap(), nvr, s_id).unwrap();
+                retry_forever(name, move || w.watch_once());
+            }));
         }
     }
-    info!("all threads started");
-    for t in threads.drain(..) {
-        t.join().unwrap();
-    }
+    info!("all running");
+    futures::future::join_all(handles).await;
 }
