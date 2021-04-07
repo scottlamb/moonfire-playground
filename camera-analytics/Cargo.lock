@@ -787,12 +787,12 @@ dependencies = [
 [[package]]
 name = "moonfire-ffmpeg"
 version = "0.0.1"
-source = "git+https://github.com/scottlamb/moonfire-ffmpeg#f30b8b0779a99fad3c047ea56b714b2a9634a796"
+source = "git+https://github.com/scottlamb/moonfire-ffmpeg#d9398b0992786f96d4efcc2f4df0fee894c58945"
 dependencies = [
  "cc",
  "libc",
  "log",
- "parking_lot 0.10.2",
+ "parking_lot 0.11.1",
  "pkg-config",
 ]
 
