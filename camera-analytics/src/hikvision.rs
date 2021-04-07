@@ -125,7 +125,12 @@ impl Watcher {
                 (Some(t), Some(a)) => (t, a),
                 _ => bail!("body {:?} must specify event type and state", p.body),
             };
-            debug!("{}: notification: {} active={}", self.name, event_type, active);
+            if event_type == "videoloss" && active == false {
+                // These videoloss active=false heartbeats are so spammy.
+                trace!("{}: notification: {} active={}", self.name, event_type, active);
+            } else {
+                debug!("{}: notification: {} active={}", self.name, event_type, active);
+            }
             if event_type == "VMD" && active && motion != Some(true) {
                 info!("{}: motion event started", self.name);
                 motion = Some(true);

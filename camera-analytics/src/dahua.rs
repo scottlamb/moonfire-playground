@@ -109,8 +109,10 @@ impl Watcher {
             if m.as_bytes() != b"text/plain" {
                 bail!("Unexpected part Content-Type {:?}", m);
             }
-            let e = Event::parse(::std::str::from_utf8(p.body)?)?;
-            debug!("event: {:#?}", &e);
+            let body = std::str::from_utf8(p.body)?;
+            debug!("{}:\n{}", &self.name, body);
+            let e = Event::parse(body)?;
+            trace!("{}: event: {:#?}", &self.name, &e);
             let mut motion = self.status.as_ref().map(|s| s.motion);
             if e.code == "VideoMotion" {
                 match e.action.as_str() {
