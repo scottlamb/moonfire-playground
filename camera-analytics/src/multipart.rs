@@ -219,7 +219,7 @@ mod tests {
         let mut i = 0;
         foreach_part_inner("multipart/mixed; boundary=boundary".parse().unwrap(),
                            &mut r, "mixed", "", |p| {
-            assert_eq!(p.headers.get(http::header::CONTENT_TYPE).unwrap().to_str().unwrap(),
+            assert_eq!(p.headers.get(reqwest::header::CONTENT_TYPE).unwrap().to_str().unwrap(),
                        "application/xml; charset=\"UTF-8\"");
             assert!(p.body.starts_with(b"<EventNotificationAlert"));
             assert!(p.body.ends_with(b"</EventNotificationAlert>\r\n"));
@@ -255,7 +255,7 @@ mod tests {
         let mut i = 0;
         foreach_part_inner("multipart/x-mixed-replace; boundary=myboundary".parse().unwrap(),
                            &mut r, "x-mixed-replace", "\r\n\r\n", |p| {
-            assert_eq!(p.headers.get(http::header::CONTENT_TYPE).unwrap().to_str().unwrap(),
+            assert_eq!(p.headers.get(reqwest::header::CONTENT_TYPE).unwrap().to_str().unwrap(),
                        "text/plain");
             match i {
                 0 => assert!(p.body.starts_with(b"Code=TimeChange")),

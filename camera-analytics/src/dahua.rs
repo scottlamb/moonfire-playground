@@ -257,7 +257,7 @@ impl Event {
 
 #[cfg(test)]
 mod tests {
-    use http::header::HeaderValue;
+    use reqwest::header::HeaderValue;
     use super::Event;
 
     #[test]
