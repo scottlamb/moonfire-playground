@@ -91,7 +91,7 @@ pub struct Recording {
     pub end_time_90k: i64,
     pub sample_file_bytes: i64,
     pub video_samples: i64,
-    pub video_sample_entry_id: Option<String>,  // mandatory in new versions
+    pub video_sample_entry_id: i32,
     pub start_id: i32,
     pub open_id: u32,
     pub first_uncommitted: Option<i32>,
@@ -225,25 +225,16 @@ impl Client {
               .json().await?)
     }
 
-    pub async fn update_signals(&self, signal_ids: &[u32], states: &[u16]) -> Result<i64, Error> {
-        debug!("update_signals: {:?} -> {:?}", signal_ids, states);
-        let body = &PostSignalsRequest {
-            signal_ids,
-            states,
-            start_time_90k: None,
-            end_base: PostSignalsEndBase::Now,
-            rel_end_time_90k: Some(30 * 90000),
-        };
+    pub async fn update_signals(&self, r: &PostSignalsRequest<'_>) -> Result<PostSignalsResponse, Error> {
         let mut req = self.client.post(self.base_url.join("/api/signals").unwrap());
         if let Some(c) = self.cookie.as_ref() {
             req = req.header(reqwest::header::COOKIE, c.clone());
         }
-        let resp: PostSignalsResponse = req
-            .json(&body)
+        Ok(req
+            .json(r)
             .send().await?
             .error_for_status()?
-            .json().await?;
-        Ok(resp.time_90k)
+            .json().await?)
     }
 
     pub async fn list_recordings(&self, r: &ListRecordingsRequest<'_>)

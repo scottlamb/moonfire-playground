@@ -141,11 +141,23 @@ impl Watcher {
                     motion,
                     as_of: now,
                 });
-                futures::executor::block_on(
-                    self.nvr.update_signals(&[self.signal_id], &[if motion { 2 } else { 1 }]))?;
+                self.update_signal(if motion { 2 } else { 1})?;
             }
             Ok(())
         })
+    }
+
+    fn update_signal(&self, new_state: u16) -> Result<(), Error> {
+        let req = moonfire_nvr_client::PostSignalsRequest {
+            signal_ids: &[self.signal_id],
+            states: &[new_state],
+            start_time_90k: None,
+            end_base: moonfire_nvr_client::PostSignalsEndBase::Now,
+            rel_end_time_90k: None,
+        };
+
+        futures::executor::block_on(self.nvr.update_signals(&req))?;
+        Ok(())
     }
 }
 
