@@ -9,7 +9,7 @@ async-trait = "0.1.36"
 base64 = "0.13"
 bstr = "0.2.13"
 bytes = "1.0"
-cstr = "0.1.7"
+cstr = "0.2"
 structopt = "0.3.21"
 failure = "0.1.5"
 fnv = "1.0.6"
@@ -22,7 +22,7 @@ moonfire-ffmpeg = { git = "https://github.com/scottlamb/moonfire-ffmpeg" }
 moonfire-nvr-client = { path = "../client" }
 mylog = { git = "https://github.com/scottlamb/mylog" }
 openssl = "0.10.16"
-pretty-hex = "0.1.0"
+pretty-hex = "0.2.1"
 regex = "1.1.0"
 reqwest = { version = "0.11.2", features = ["blocking", "json"] }
 serde = { version = "1.0", features = ["derive"] }
