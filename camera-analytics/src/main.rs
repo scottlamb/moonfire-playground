@@ -40,8 +40,6 @@ mod rtsp;
 
 use failure::Error;
 use fnv::FnvHashMap;
-use reqwest::header::HeaderValue;
-use reqwest::Url;
 use std::future::Future;
 use std::str::FromStr;
 use structopt::StructOpt;

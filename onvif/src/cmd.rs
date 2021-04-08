@@ -128,7 +128,7 @@ impl<'a> UsernameToken<'a> {
     }
 }
 
-fn write_header(w: &mut Write, t: &UsernameToken) -> Result<(), Error> {
+fn write_header(w: &mut dyn Write, t: &UsernameToken) -> Result<(), Error> {
     write!(w, r#"<?xml version="1.0" encoding="UTF-8"?>
 <s:Envelope xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
             xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"
@@ -153,7 +153,7 @@ fn write_header(w: &mut Write, t: &UsernameToken) -> Result<(), Error> {
     Ok(())
 }
 
-fn write_footer(w: &mut Write) -> Result<(), Error> {
+fn write_footer(w: &mut dyn Write) -> Result<(), Error> {
     write!(w, "  </s:Body>\n</s:Envelope>\n")?;
     Ok(())
 }

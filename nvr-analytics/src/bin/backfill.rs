@@ -262,7 +262,7 @@ fn process_recording(ctx: &Context<'_>, streams: &Vec<&Stream>, recording: &Reco
         let pkt = match input.read_frame() {
             Ok(p) => p,
             Err(e) if e.is_eof() => { break; },
-            Err(e) => panic!(e),
+            Err(e) => panic!("{}", e),
         };
         if pkt.stream_index() != VIDEO_STREAM {
             continue;
@@ -377,7 +377,7 @@ fn main() -> Result<(), Error> {
     };
 
     let _ffmpeg = moonfire_ffmpeg::Ffmpeg::new();
-    let mut rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Runtime::new()?;
 
     info!("Finding recordings");
     let stuff = rt.block_on(list_recordings(&ctx))?;

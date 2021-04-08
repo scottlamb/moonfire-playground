@@ -1,7 +1,6 @@
 use failure::Error;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use log::debug;
 use uuid::Uuid;
 
 pub use moonfire_base::time::{Time, Duration};

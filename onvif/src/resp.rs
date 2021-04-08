@@ -42,7 +42,7 @@ impl GetCapabilitiesResponse {
         )
         .ok_or_else(|| format_err!("can't find Events/XAddr"))?
         .text()
-        .ok_or_else(|| format_err!("Events/XAddr has no text"))?;;
+        .ok_or_else(|| format_err!("Events/XAddr has no text"))?;
         let media_url = xml::find(
             cap,
             &[
@@ -52,7 +52,7 @@ impl GetCapabilitiesResponse {
         )
         .ok_or_else(|| format_err!("can't find Media/XAddr"))?
         .text()
-        .ok_or_else(|| format_err!("Media/XAddr has no text"))?;;
+        .ok_or_else(|| format_err!("Media/XAddr has no text"))?;
         Ok(Self {
             events_url: Url::parse(events_url)?,
             media_url: Url::parse(media_url)?,

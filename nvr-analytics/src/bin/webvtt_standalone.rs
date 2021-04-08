@@ -103,7 +103,7 @@ fn main() {
         let pkt = match input.read_frame() {
             Ok(p) => p,
             Err(e) if e.is_eof() => { break; },
-            Err(e) => panic!(e),
+            Err(e) => panic!("{}", e),
         };
         if pkt.stream_index() != VIDEO_STREAM {
             continue;
