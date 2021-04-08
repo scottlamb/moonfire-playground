@@ -5,6 +5,7 @@ members = [
   "client",
   "nvr-analytics",
   "onvif",
+  "split-live",
 ]
 
 [profile.release]
