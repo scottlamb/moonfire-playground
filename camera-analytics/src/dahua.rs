@@ -141,7 +141,7 @@ impl Watcher {
                     motion,
                     as_of: now,
                 });
-                self.update_signal(if motion { 2 } else { 1})?;
+                self.update_signal(if motion { 2 } else { 1 })?;
             }
             Ok(())
         })

@@ -9,15 +9,13 @@ name = "inferencer"
 
 [[bin]]
 name = "inferencer_server"
-#required-features = ["moonfire-tflite"]
 
 [[bin]]
 name = "webvtt_standalone"
-#required-features = ["moonfire-tflite"]
 
 [dependencies]
-bytes = "0.5.4"
-crossbeam = "0.7.3"
+bytes = "1.0"
+crossbeam = "0.8"
 cstr = "0.1.7"
 failure = "0.1.7"
 futures = "0.3.4"
@@ -25,24 +23,21 @@ log = { version = "0.4.8", features = ["release_max_level_debug"] }
 indicatif = "0.14.0"
 moonfire-nvr-client = { path = "../client" }
 moonfire-ffmpeg = { git = "https://github.com/scottlamb/moonfire-ffmpeg", features = ["swscale"] }
-moonfire-tflite = { git = "https://github.com/scottlamb/moonfire-tflite", features = ["edgetpu"], optional = false }
+moonfire-tflite = { git = "https://github.com/scottlamb/moonfire-tflite", features = ["edgetpu"] }
 mylog = { git = "https://github.com/scottlamb/mylog" }
-parking_lot = "0.10.0"
-prost = "0.6"
+parking_lot = "0.11.0"
+prost = "0.7"
 rayon = "1.3.0"
-reqwest = "0.10.4"
+reqwest = "0.11.2"
 rusqlite = "0.21.0"
 serde = { version = "1.0.104", features = ["derive"] }
 serde_json = "1.0.48"
 structopt = "0.3.12"
-tokio = { version = "0.2.0", features = ["blocking", "macros", "rt-threaded", "signal"] }
-tonic = "0.1"
+tokio = { version = "1.0", features = ["full"] }
+tonic = "0.4"
 uuid = "0.8.1"
 zstd = "0.5.1"
 
 [build-dependencies]
-prost-build = "0.6.1"
-tonic-build = "0.1.0"
-
-[profile.release]
-debug = true
+prost-build = "0.7"
+tonic-build = "0.4.1"

@@ -53,7 +53,7 @@ fn main() {
     let devices = moonfire_tflite::edgetpu::Devices::list();
     if !devices.is_empty() {
         delegate = devices[0].create_delegate().unwrap();
-        builder.add_delegate(&delegate);
+        builder.add_borrowed_delegate(&delegate);
     }
     let mut interpreter = builder.build(&m).unwrap();
 
@@ -116,7 +116,7 @@ fn main() {
         prev_objs.clear();
         prev_pts = f.pts();
         s.scale(&f, &mut scaled);
-        moonfire_motion::copy(&scaled, &mut interpreter.inputs()[0]);
+        nvr_analytics::copy(&scaled, &mut interpreter.inputs()[0]);
         interpreter.invoke().unwrap();
         let outputs = interpreter.outputs();
         let boxes = outputs[0].f32s();
@@ -127,7 +127,7 @@ fn main() {
                 continue;
             }
             let class = classes[i];
-            let l = moonfire_motion::label(class);
+            let l = nvr_analytics::label(class);
             let box_ = &boxes[4*i..4*i+4];
             if let Some(label) = l {
                 prev_objs.push(Object {

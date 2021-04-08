@@ -23,7 +23,7 @@ impl MyInferencer {
         let m = moonfire_tflite::Model::from_static(nvr_analytics::MODEL).unwrap();
         let mut builder = moonfire_tflite::Interpreter::builder();
         if let Some(d) = delegate {
-            builder.add_delegate(d);
+            builder.add_borrowed_delegate(d);
         }
         let interpreter = builder.build(&m).unwrap();
 

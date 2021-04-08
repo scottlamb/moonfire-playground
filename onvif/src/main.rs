@@ -3,18 +3,24 @@ mod resp;
 mod xml;
 
 use chrono::{DateTime, FixedOffset};
-use docopt::Docopt;
 use failure::{Error, bail, format_err};
+use structopt::StructOpt;
 use url::Url;
 
-const USAGE: &'static str = "
-Usage:
-  onvif --base_url=URL --username=USERNAME --password=PASSWORD
-  onvif (-h | --help)
-";
+#[derive(StructOpt)]
+struct Opt {
+    #[structopt(long, parse(try_from_str))]
+    base_url: reqwest::Url,
+
+    #[structopt(long)]
+    username: String,
+
+    #[structopt(long)]
+    password: String,
+}
 
 struct Subscription {
-    client: reqwest::Client,
+    client: reqwest::blocking::Client,
     ref_url: Option<Url>,
     username: String,
     password: String,
@@ -34,7 +40,7 @@ fn ensure_url_within_base(url: &mut Url, base: &Url) -> Result<(), Error> {
 
 impl Subscription {
     fn new(base_url: Url, username: String, password: String) -> Result<Self, Error> {
-        let client = reqwest::Client::builder()
+        let client = reqwest::blocking::Client::builder()
             .build()?;
         let device_url = base_url.join("onvif/device_service")?;
         let mut get_cap_resp =
@@ -93,29 +99,24 @@ impl Drop for Subscription {
 }
 
 fn main() {
-    let args = Docopt::new(USAGE).and_then(|d| d.parse()).unwrap_or_else(|e| e.exit());
-    let base_url = Url::parse(args.get_str("--base_url")).unwrap();
-    let username: &str = args.get_str("--username");
-    let password: &str = args.get_str("--password");
+    let opt = Opt::from_args();
 
     //let mut s =
-    //    Subscription::new(base_url.clone(), username.to_owned(), password.to_owned()).unwrap();
+    //    Subscription::new(opt.base_url.clone(),
+    //                      opt.username.to_owned(),
+    //                      opt.password.to_owned()).unwrap();
     //for _ in 0..10 {
     //    dbg!(s.pull().unwrap());
     //}
 
-    let client = reqwest::Client::builder()
+    let client = reqwest::blocking::Client::builder()
         .build().unwrap();
-    let device_url = base_url.join("onvif/device_service").unwrap();
-    let mut get_cap_resp =
-        cmd::get_capabilities(&client, device_url,
-                              &cmd::UsernameToken::new(username, password)).unwrap();
+    let device_url = opt.base_url.join("onvif/device_service").unwrap();
+    let token = cmd::UsernameToken::new(&opt.username, &opt.password);
+    let mut get_cap_resp = cmd::get_capabilities(&client, device_url, &token).unwrap();
     dbg!(&get_cap_resp);
-    ensure_url_within_base(&mut get_cap_resp.media_url, &base_url).unwrap();
-    //println!("{}", cmd::get_metadata_configurations(&client, get_cap_resp.media_url.clone(),
-    //                                               &cmd::UsernameToken::new(username, password)).unwrap());
-    //println!("{}", cmd::set_metadata_configuration(&client, get_cap_resp.media_url,
-    //                                               &cmd::UsernameToken::new(username, password)).unwrap());
-    //println!("{}", cmd::add_metadata_configuration(&client, get_cap_resp.media_url.clone(),
-    //                                               &cmd::UsernameToken::new(username, password)).unwrap());
+    ensure_url_within_base(&mut get_cap_resp.media_url, &opt.base_url).unwrap();
+    //println!("{}", cmd::get_metadata_configurations(&client, get_cap_resp.media_url.clone(), &token).unwrap());
+    //println!("{}", cmd::set_metadata_configuration(&client, get_cap_resp.media_url.clone(), &token).unwrap());
+    //println!("{}", cmd::add_metadata_configuration(&client, get_cap_resp.media_url.clone(), &token).unwrap());
 }

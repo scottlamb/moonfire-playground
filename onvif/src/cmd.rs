@@ -167,7 +167,7 @@ fn get_capabilities_request(t: &UsernameToken) -> Result<String, Error> {
 }
 
 pub fn get_capabilities(
-    cli: &reqwest::Client,
+    cli: &reqwest::blocking::Client,
     device_url: Url,
     t: &UsernameToken,
 ) -> Result<resp::GetCapabilitiesResponse, Error> {
@@ -196,7 +196,7 @@ fn create_pull_point_subscription_request(t: &UsernameToken) -> Result<String, E
 }
 
 pub fn create_pull_point_subscription(
-    cli: &reqwest::Client,
+    cli: &reqwest::blocking::Client,
     events_url: Url,
     t: &UsernameToken,
 ) -> Result<resp::CreatePullPointSubscriptionResponse, Error> {
@@ -220,7 +220,7 @@ fn pull_messages_request(t: &UsernameToken) -> Result<String, Error> {
     Ok(s)
 }
 
-pub fn pull_messages(cli: &reqwest::Client, ref_url: Url, t: &UsernameToken) -> Result<resp::PullMessagesResponse, Error> {
+pub fn pull_messages(cli: &reqwest::blocking::Client, ref_url: Url, t: &UsernameToken) -> Result<resp::PullMessagesResponse, Error> {
     let body = pull_messages_request(t)?;
     let mut resp = cli
         .post(ref_url)
@@ -244,7 +244,7 @@ fn unsubscribe_request(t: &UsernameToken) -> Result<String, Error> {
     Ok(s)
 }
 
-pub fn unsubscribe(cli: &reqwest::Client, ref_url: Url, t: &UsernameToken) -> Result<resp::UnsubscribeResponse, Error> {
+pub fn unsubscribe(cli: &reqwest::blocking::Client, ref_url: Url, t: &UsernameToken) -> Result<resp::UnsubscribeResponse, Error> {
     let body = unsubscribe_request(t)?;
     let mut resp = cli
         .post(ref_url)
@@ -268,7 +268,7 @@ fn get_metadata_configurations_request(t: &UsernameToken) -> Result<String, Erro
     Ok(s)
 }
 
-pub fn get_metadata_configurations(cli: &reqwest::Client, media_url: Url, t: &UsernameToken) -> Result<String, Error> {
+pub fn get_metadata_configurations(cli: &reqwest::blocking::Client, media_url: Url, t: &UsernameToken) -> Result<String, Error> {
     let body = get_metadata_configurations_request(t)?;
     let mut resp = cli
         .post(media_url)
@@ -292,7 +292,7 @@ fn set_metadata_configuration_request(t: &UsernameToken) -> Result<String, Error
 }
 
 // TODO: response proto.
-pub fn set_metadata_configuration(cli: &reqwest::Client, media_url: Url, t: &UsernameToken) -> Result<String, Error> {
+pub fn set_metadata_configuration(cli: &reqwest::blocking::Client, media_url: Url, t: &UsernameToken) -> Result<String, Error> {
     let body = set_metadata_configuration_request(t)?;
     let mut resp = cli
         .post(media_url)
@@ -317,7 +317,7 @@ fn add_metadata_configuration_request(t: &UsernameToken) -> Result<String, Error
 }
 
 // TODO: response proto.
-pub fn add_metadata_configuration(cli: &reqwest::Client, media_url: Url, t: &UsernameToken) -> Result<String, Error> {
+pub fn add_metadata_configuration(cli: &reqwest::blocking::Client, media_url: Url, t: &UsernameToken) -> Result<String, Error> {
     let body = add_metadata_configuration_request(t)?;
     let mut resp = cli
         .post(media_url)

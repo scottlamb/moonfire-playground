@@ -38,20 +38,23 @@ mod hikvision;
 mod multipart;
 mod rtsp;
 
-use docopt::Docopt;
 use failure::Error;
 use fnv::FnvHashMap;
 use reqwest::header::HeaderValue;
 use reqwest::Url;
 use std::future::Future;
 use std::str::FromStr;
+use structopt::StructOpt;
 use uuid::Uuid;
 
-const USAGE: &'static str = "
-Usage:
-  camera-analytics [--cookie=COOKIE] --nvr=URL
-  camera-analytics (-h | --help)
-";
+#[derive(StructOpt)]
+struct Opt {
+    #[structopt(short, long, parse(try_from_str))]
+    cookie: Option<reqwest::header::HeaderValue>,
+
+    #[structopt(short, long, parse(try_from_str))]
+    nvr: reqwest::Url,
+}
 
 fn retry_forever<F>(name: String, mut f: F)
 where F: FnMut() -> Result<(), Error> {
@@ -105,11 +108,8 @@ fn init_logging() -> mylog::Handle {
 async fn main() {
     let mut h = init_logging();
     let _a = h.async_scope();
-    let args = Docopt::new(USAGE).and_then(|d| d.parse()).unwrap_or_else(|e| e.exit());
-    let cookie = args.find("--cookie")
-                     .map(|v| HeaderValue::from_str(v.as_str()).unwrap());
-    let nvr = Url::parse(args.get_str("--nvr")).unwrap();
-    let nvr: &'static _ = Box::leak(Box::new(moonfire_nvr_client::Client::new(nvr, cookie)));
+    let opt = Opt::from_args();
+    let nvr: &'static _ = Box::leak(Box::new(moonfire_nvr_client::Client::new(opt.nvr, opt.cookie)));
     let top_level = retry_http("get camera configs from nvr",
                                || nvr.top_level(&moonfire_nvr_client::TopLevelRequest {
         days: false,

@@ -1,0 +1,14 @@
+[workspace]
+
+members = [
+  "camera-analytics",
+  "client",
+  "nvr-analytics",
+  "onvif",
+]
+
+[profile.release]
+debug = true
+
+[profile.bench]
+debug = true
