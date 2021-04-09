@@ -52,6 +52,9 @@ struct Opt {
 
     #[structopt(short, long, parse(try_from_str))]
     nvr: reqwest::Url,
+
+    #[structopt(long)]
+    dry_run: bool,
 }
 
 fn retry_forever<F>(name: String, mut f: F)
@@ -114,6 +117,7 @@ async fn main() {
         camera_configs: true,
     })).await.unwrap();
 
+    let dry_run = opt.dry_run;
     let dahua_uuid = Uuid::parse_str("ee66270f-d9c6-4819-8b33-9720d4cbca6b").unwrap();
     let hikvision_uuid = Uuid::parse_str("18bf0756-2120-4fbc-99d1-a367b10ef297").unwrap();
     let rtsp_uuid = Uuid::parse_str("5684523f-f29d-42e9-b6af-1e123f2b76fb").unwrap();
@@ -144,18 +148,28 @@ async fn main() {
         } else if s.type_ == dahua_uuid {
             let name = c.short_name.clone();
             info!("watching dahua camera {}", &name);
-            handles.push(tokio::task::spawn_blocking(move || {
+            handles.push(tokio::spawn(async move {
                 let mut w = dahua::Watcher::new(
-                    name.clone(), c.config.as_ref().unwrap(), nvr, s_id).unwrap();
-                retry_forever(name, move || w.watch_once());
+                    name.clone(), c.config.as_ref().unwrap(), nvr, dry_run, s_id).unwrap();
+                loop {
+                    if let Err(e) = w.watch_once().await {
+                        error!("{}: {:?}", &name, e);
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }
+                }
             }));
         } else if s.type_ == hikvision_uuid {
             let name = c.short_name.clone();
             info!("watching hikvision camera {}", &name);
-            handles.push(tokio::task::spawn_blocking(move || {
+            handles.push(tokio::spawn(async move {
                 let mut w = hikvision::Watcher::new(
-                    name.clone(), c.config.as_ref().unwrap(), nvr, s_id).unwrap();
-                retry_forever(name, move || w.watch_once());
+                    name.clone(), c.config.as_ref().unwrap(), nvr, dry_run, s_id).unwrap();
+                loop {
+                    if let Err(e) = w.watch_once().await {
+                        error!("{}: {:?}", &name, e);
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }
+                }
             }));
         }
     }

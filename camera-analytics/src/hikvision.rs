@@ -49,9 +49,10 @@
 //!      apparently useless.
 
 use bytes::{BufMut, BytesMut};
-use crate::multipart::{Part, foreach_part};
+use crate::multipart::parts;
 use failure::{bail, format_err, Error};
-use reqwest::blocking::Client;
+use futures::StreamExt;
+use reqwest::Client;
 use reqwest::header::{self, HeaderValue};
 use reqwest::Url;
 use mime;
@@ -66,7 +67,7 @@ static NAMESPACES: [&'static str; 2] = [
 ];
 
 /// I/O timeout. The camera sends a few events per second, even when there's nothing to report.
-static IO_TIMEOUT: Duration = Duration::from_secs(5);
+//static IO_TIMEOUT: Duration = Duration::from_secs(5);
 static UPDATE_INTERVAL: Duration = Duration::from_secs(15);
 
 struct Status {
@@ -80,16 +81,17 @@ pub struct Watcher {
     url: Url,
     auth: HeaderValue,
     nvr: &'static moonfire_nvr_client::Client,
+    dry_run: bool,
     signal_id: u32,
     status: Option<Status>,
 }
 
 impl Watcher {
     pub fn new(name: String, config: &moonfire_nvr_client::CameraConfig,
-               nvr: &'static moonfire_nvr_client::Client, signal_id: u32) -> Result<Self, Error> {
+               nvr: &'static moonfire_nvr_client::Client, dry_run: bool,
+               signal_id: u32) -> Result<Self, Error> {
         // TODO: is there a separate connect timeout?
         let client = Client::builder()
-            .timeout(Some(IO_TIMEOUT))
             .build()?;
         let h = config.onvif_host.as_ref()
             .ok_or_else(|| format_err!("Hikvision camera {} has no ONVIF host", &name))?;
@@ -99,19 +101,27 @@ impl Watcher {
             url: Url::parse(&format!("http://{}/Event/notification/alertStream", &h))?,
             auth: basic_auth(&config.username, &config.password),
             nvr,
+            dry_run,
             signal_id,
             status: None,
         })
     }
 
-    pub fn watch_once(&mut self) -> Result<(), Error> {
+    pub async fn watch_once(&mut self) -> Result<(), Error> {
         debug!("{}: watch_once call; url: {}", self.name, self.url);
-        let mut resp = self.client.get(self.url.clone())
-                                  .header(header::AUTHORIZATION, &self.auth)
-                                  .send()?
-                                  .error_for_status()?;
+        let resp = self.client.get(self.url.clone())
+                              .header(header::AUTHORIZATION, &self.auth)
+                              .send()
+                              .await?
+                              .error_for_status()?;
 
-        foreach_part(&mut resp, "mixed", "", &mut |p: Part| {
+        let mut parts = Box::pin(parts(resp, "mixed", b"")?);
+        loop {
+            let p = match parts.next().await {
+                None => return Ok(()),
+                Some(Err(e)) => return Err(e.into()),
+                Some(Ok(p)) => p,
+            };
             let mut motion = self.status.as_ref().map(|s| s.motion);
             let m: mime::Mime = p.headers.get(header::CONTENT_TYPE)
                 .ok_or_else(|| format_err!("Missing part Content-Type"))?
@@ -120,7 +130,7 @@ impl Watcher {
             if m.type_() != "application" || m.subtype() != "xml" {
                 bail!("Unexpected part Content-Type {}", m);
             }
-            let notification = parse(p.body)?;
+            let notification = parse(&p.body)?;
             let (event_type, active) = match (notification.event_type, notification.active) {
                 (Some(t), Some(a)) => (t, a),
                 _ => bail!("body {:?} must specify event type and state", p.body),
@@ -139,7 +149,7 @@ impl Watcher {
                 motion = Some(false);
             }
             let motion = match motion {
-                None => return Ok(()),  // if we never learned motion state, nothing to do.
+                None => continue,  // if we never learned motion state, nothing to do.
                 Some(m) => m,
             };
             let now = Instant::now();
@@ -154,11 +164,13 @@ impl Watcher {
                 });
                 self.update_signal(if motion { 2 } else { 1 })?;
             }
-            Ok(())
-        })
+        }
     }
 
     fn update_signal(&self, new_state: u16) -> Result<(), Error> {
+        if self.dry_run {
+            return Ok(());
+        }
         let req = moonfire_nvr_client::PostSignalsRequest {
             signal_ids: &[self.signal_id],
             states: &[new_state],

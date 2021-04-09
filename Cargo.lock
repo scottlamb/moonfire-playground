@@ -196,6 +196,7 @@ dependencies = [
  "moonfire-nvr-client",
  "mylog",
  "openssl",
+ "pin-project",
  "pretty-hex",
  "regex",
  "reqwest",

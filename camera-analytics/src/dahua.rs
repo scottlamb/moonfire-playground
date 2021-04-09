@@ -30,16 +30,17 @@
 
 //! Dahua on-camera motion detection.
 
-use crate::multipart::{Part, foreach_part};
+use crate::multipart::{Part, parts};
 use failure::{bail, format_err, Error};
+use futures::StreamExt;
 use reqwest::header::{self, HeaderValue};
 use openssl::hash;
 use regex::Regex;
-use reqwest::blocking::Client;
+use reqwest::Client;
 use reqwest::Url;
 use std::time::{Duration, Instant};
 
-static IO_TIMEOUT: Duration = Duration::from_secs(120);
+//static IO_TIMEOUT: Duration = Duration::from_secs(120);
 static ATTACH_URL: &'static str = "/cgi-bin/eventManager.cgi?action=attach&codes=%5BAll%5D";
 static UPDATE_INTERVAL: Duration = Duration::from_secs(15);
 
@@ -51,6 +52,7 @@ struct Status {
 pub struct Watcher {
     name: String,
     client: Client,
+    dry_run: bool,
     url: Url,
     username: String,
     password: String,
@@ -61,10 +63,9 @@ pub struct Watcher {
 
 impl Watcher {
     pub fn new(name: String, config: &moonfire_nvr_client::CameraConfig,
-               nvr: &'static moonfire_nvr_client::Client,
+               nvr: &'static moonfire_nvr_client::Client, dry_run: bool,
                signal_id: u32) -> Result<Self, Error> {
         let client = Client::builder()
-            .timeout(Some(IO_TIMEOUT))
             .build()?;
         let h = config.onvif_host.as_ref()
             .ok_or_else(|| format_err!("Dahua camera {} has no ONVIF host", &name))?;
@@ -75,15 +76,17 @@ impl Watcher {
             username: config.username.clone(),
             password: config.password.clone(),
             nvr,
+            dry_run,
             signal_id,
             status: None,
         })
     }
 
-    pub fn watch_once(&mut self) -> Result<(), Error> {
+    pub async fn watch_once(&mut self) -> Result<(), Error> {
         debug!("{}: watch_once call; url: {}", self.name, self.url);
         let mut resp = self.client.get(self.url.clone())
-                                  .send()?;
+                                  .send()
+                                  .await?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             let v = {
                 let auth = resp.headers().get(header::WWW_AUTHENTICATE)
@@ -99,17 +102,24 @@ impl Watcher {
             };
             resp = self.client.get(self.url.clone())
                               .header(header::AUTHORIZATION, v)
-                              .send()?;
+                              .send()
+                              .await?;
         }
 
-        let mut resp = resp.error_for_status()?;
-        foreach_part(&mut resp, "x-mixed-replace", "\r\n\r\n", &mut |p: Part| {
+        let resp = resp.error_for_status()?;
+        let mut parts = Box::pin(parts(resp, "x-mixed-replace", b"\r\n\r\n")?);
+        loop {
+            let p: Part = match parts.next().await {
+                None => return Ok(()),
+                Some(Err(e)) => return Err(e.into()),
+                Some(Ok(p)) => p,
+            };
             let m = p.headers.get(header::CONTENT_TYPE)
                 .ok_or_else(|| format_err!("Missing part Content-Type"))?;
             if m.as_bytes() != b"text/plain" {
                 bail!("Unexpected part Content-Type {:?}", m);
             }
-            let body = std::str::from_utf8(p.body)?;
+            let body = std::str::from_utf8(&p.body)?;
             debug!("{}:\n{}", &self.name, body);
             let e = Event::parse(body)?;
             trace!("{}: event: {:#?}", &self.name, &e);
@@ -143,11 +153,13 @@ impl Watcher {
                 });
                 self.update_signal(if motion { 2 } else { 1 })?;
             }
-            Ok(())
-        })
+        }
     }
 
     fn update_signal(&self, new_state: u16) -> Result<(), Error> {
+        if self.dry_run {
+            return Ok(());
+        }
         let req = moonfire_nvr_client::PostSignalsRequest {
             signal_ids: &[self.signal_id],
             states: &[new_state],
