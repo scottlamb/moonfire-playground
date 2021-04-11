@@ -1,0 +1,14 @@
+[package]
+name = "avcc"
+version = "0.1.0"
+authors = ["Scott Lamb <slamb@slamb.org>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+failure = "0.1.8"
+h264-reader = { git = "https://github.com/scottlamb/h264-reader", branch = "more-public-fields" }
+pretty-hex = "0.2.1"
+rusqlite = "0.25.0"
+structopt = "0.3.21"

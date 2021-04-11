@@ -1,6 +1,7 @@
 [workspace]
 
 members = [
+  "avcc",
   "camera-analytics",
   "client",
   "nvr-analytics",
