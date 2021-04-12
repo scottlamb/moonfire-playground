@@ -1021,6 +1021,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nal-viewer"
+version = "0.1.0"
+dependencies = [
+ "failure",
+ "h264-reader",
+ "pretty-hex",
+ "structopt",
+]
+
+[[package]]
 name = "native-tls"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
