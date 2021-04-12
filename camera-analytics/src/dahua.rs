@@ -30,6 +30,7 @@
 
 //! Dahua on-camera motion detection.
 
+use crate::send_with_timeout;
 use crate::multipart::{Part, parts};
 use failure::{bail, format_err, Error};
 use futures::StreamExt;
@@ -38,15 +39,20 @@ use openssl::hash;
 use regex::Regex;
 use reqwest::Client;
 use reqwest::Url;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
-//static IO_TIMEOUT: Duration = Duration::from_secs(120);
+static CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+static IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 static ATTACH_URL: &'static str = "/cgi-bin/eventManager.cgi?action=attach&codes=%5BAll%5D";
 static UPDATE_INTERVAL: Duration = Duration::from_secs(15);
 
+const UNKNOWN: u16 = 0;
+const STILL: u16 = 1;
+const MOVING: u16 = 2;
 struct Status {
     as_of: Instant,
-    motion: bool,
+    state: u16,
 }
 
 pub struct Watcher {
@@ -58,7 +64,7 @@ pub struct Watcher {
     password: String,
     nvr: &'static moonfire_nvr_client::Client,
     signal_id: u32,
-    status: Option<Status>,
+    status: Status,
 }
 
 impl Watcher {
@@ -78,15 +84,31 @@ impl Watcher {
             nvr,
             dry_run,
             signal_id,
-            status: None,
+            status: Status {
+                as_of: Instant::now(),
+                state: UNKNOWN,
+            }
         })
     }
 
     pub async fn watch_once(&mut self) -> Result<(), Error> {
+        let e = match self.watch_once_inner().await {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
+        if self.status.state != 0 {
+            if let Err(e) = self.update_signal(0).await {
+                warn!("could not reset motion status to 0: {}", e);
+            }
+        }
+        Err(e)
+    }
+
+    pub async fn watch_once_inner(&mut self) -> Result<(), Error> {
         debug!("{}: watch_once call; url: {}", self.name, self.url);
-        let mut resp = self.client.get(self.url.clone())
-                                  .send()
-                                  .await?;
+
+        // Open the URL, giving up after CONNECT_TIMEOUT.
+        let mut resp = send_with_timeout(CONNECT_TIMEOUT, self.client.get(self.url.clone())).await?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             let v = {
                 let auth = resp.headers().get(header::WWW_AUTHENTICATE)
@@ -100,75 +122,75 @@ impl Watcher {
                     cnonce: &random_cnonce(),
                 })
             };
-            resp = self.client.get(self.url.clone())
-                              .header(header::AUTHORIZATION, v)
-                              .send()
-                              .await?;
+            resp = send_with_timeout(
+                CONNECT_TIMEOUT,
+                self.client.get(self.url.clone())
+                           .header(header::AUTHORIZATION, v))
+                .await?;
         }
+        let mut idle_deadline = Instant::now() + IDLE_TIMEOUT;
 
         let resp = resp.error_for_status()?;
         let mut parts = Box::pin(parts(resp, "x-mixed-replace", b"\r\n\r\n")?);
         loop {
-            let p: Part = match parts.next().await {
-                None => return Ok(()),
-                Some(Err(e)) => return Err(e.into()),
-                Some(Ok(p)) => p,
-            };
-            let m = p.headers.get(header::CONTENT_TYPE)
-                .ok_or_else(|| format_err!("Missing part Content-Type"))?;
-            if m.as_bytes() != b"text/plain" {
-                bail!("Unexpected part Content-Type {:?}", m);
-            }
-            let body = std::str::from_utf8(&p.body)?;
-            debug!("{}:\n{}", &self.name, body);
-            let e = Event::parse(body)?;
-            trace!("{}: event: {:#?}", &self.name, &e);
-            let mut motion = self.status.as_ref().map(|s| s.motion);
-            if e.code == "VideoMotion" {
-                match e.action.as_str() {
-                    "Start" if motion != Some(true) => {
-                        info!("{}: motion event started", self.name);
-                        motion = Some(true);
-                    },
-                    "Stop" if motion != Some(false) => {
-                        info!("{}: motion event ended", self.name);
-                        motion = Some(false);
-                    },
-                    _ => bail!("can't understand motion event {:#?}", e),
-                }
-            }
-            let motion = match motion {
-                None => return Ok(()),  // if we never learned motion state, nothing to do.
-                Some(m) => m,
-            };
-            let now = Instant::now();
-            let need_update = match self.status.as_ref() {
-                None => true,
-                Some(s) => s.motion != motion || now.duration_since(s.as_of) > UPDATE_INTERVAL,
-            };
-            if need_update {
-                self.status = Some(Status {
-                    motion,
-                    as_of: now,
-                });
-                self.update_signal(if motion { 2 } else { 1 })?;
+            tokio::select! {
+                biased;
+                p = parts.next() => {
+                    idle_deadline = Instant::now() + IDLE_TIMEOUT; // extend deadline.
+                    let p: Part = match p {
+                        None => bail!("Unexpected end of multipart stream"),
+                        Some(p) => p?,
+                    };
+                    let m = p.headers.get(header::CONTENT_TYPE)
+                        .ok_or_else(|| format_err!("Missing part Content-Type"))?;
+                    if m.as_bytes() != b"text/plain" {
+                        bail!("Unexpected part Content-Type {:?}", m);
+                    }
+                    let body = std::str::from_utf8(&p.body)?;
+                    debug!("{}:\n{}", &self.name, body);
+                    let e = Event::parse(body)?;
+                    trace!("{}: event: {:#?}", &self.name, &e);
+                    if e.code == "SmartMotionHuman" {
+                        let new_state = match e.action.as_str() {
+                            "Start" => MOVING,
+                            "Stop" => STILL,
+                            _ => bail!("can't understand motion event {:#?}", e),
+                        };
+                        if new_state != self.status.state {
+                            self.update_signal(new_state).await?;
+                        }
+                    }
+                },
+                _ = tokio::time::sleep_until(idle_deadline) => {
+                    bail!("No part received in {:?}", IDLE_TIMEOUT);
+                },
+                _ = tokio::time::sleep_until(self.status.as_of + UPDATE_INTERVAL) => {
+                    // Update with current status, extending the prediction.
+                    self.update_signal(self.status.state).await?;
+                },
             }
         }
     }
 
-    fn update_signal(&self, new_state: u16) -> Result<(), Error> {
-        if self.dry_run {
-            return Ok(());
+    async fn update_signal(&mut self, new_state: u16) -> Result<(), Error> {
+        let just_before = Instant::now();
+        if self.status.state == new_state {
+            // Just a refresh.
+            trace!("{}: state {}->{}", &self.name, self.status.state, new_state);
+        } else {
+            debug!("{}: state {}->{}", &self.name, self.status.state, new_state);
         }
-        let req = moonfire_nvr_client::PostSignalsRequest {
-            signal_ids: &[self.signal_id],
-            states: &[new_state],
-            start_time_90k: None,
-            end_base: moonfire_nvr_client::PostSignalsEndBase::Now,
-            rel_end_time_90k: None,
-        };
-
-        futures::executor::block_on(self.nvr.update_signals(&req))?;
+        if !self.dry_run {
+            self.nvr.update_signals(&moonfire_nvr_client::PostSignalsRequest {
+                signal_ids: &[self.signal_id],
+                states: &[new_state],
+                start_time_90k: None,
+                end_base: moonfire_nvr_client::PostSignalsEndBase::Now,
+                rel_end_time_90k: Some(30 * 90000),
+            }).await?;
+        }
+        self.status.as_of = just_before;
+        self.status.state = new_state;
         Ok(())
     }
 }

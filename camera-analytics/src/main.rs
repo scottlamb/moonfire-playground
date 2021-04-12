@@ -38,7 +38,8 @@ mod hikvision;
 mod multipart;
 mod rtsp;
 
-use failure::Error;
+use failure::{Error, format_err};
+use futures::TryFutureExt;
 use fnv::FnvHashMap;
 use std::future::Future;
 use std::str::FromStr;
@@ -91,6 +92,16 @@ where F: Future<Output = Result<T, Error>> {
         std::thread::sleep(std::time::Duration::from_secs(1));
         attempt += 1;
     }
+}
+
+/// Sends the request with a timeout just for getting a `Response`.
+/// Unlike [reqwest::RequestBuilder::timeout], this does not apply to finishing the
+/// response body. That wouldn't be very useful for never-ending multipart streams.
+fn send_with_timeout(timeout: std::time::Duration, builder: reqwest::RequestBuilder) -> impl Future<Output = Result<reqwest::Response, Error>> {
+    tokio::time::timeout(timeout, builder.send())
+        .map_ok_or_else(
+            |elapsed| Err(format_err!("connect timeout after {}", elapsed)),
+            |connect_result| connect_result.map_err(Error::from))
 }
 
 fn init_logging() -> mylog::Handle {

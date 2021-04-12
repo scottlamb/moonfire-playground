@@ -162,12 +162,12 @@ impl Watcher {
                     motion,
                     as_of: now,
                 });
-                self.update_signal(if motion { 2 } else { 1 })?;
+                self.update_signal(if motion { 2 } else { 1 }).await?;
             }
         }
     }
 
-    fn update_signal(&self, new_state: u16) -> Result<(), Error> {
+    async fn update_signal(&self, new_state: u16) -> Result<(), Error> {
         if self.dry_run {
             return Ok(());
         }
@@ -176,10 +176,10 @@ impl Watcher {
             states: &[new_state],
             start_time_90k: None,
             end_base: moonfire_nvr_client::PostSignalsEndBase::Now,
-            rel_end_time_90k: None,
+            rel_end_time_90k: Some(30 * 90000),
         };
 
-        futures::executor::block_on(self.nvr.update_signals(&req))?;
+        self.nvr.update_signals(&req).await?;
         Ok(())
     }
 }
