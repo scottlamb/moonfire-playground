@@ -181,13 +181,26 @@ impl Watcher {
             debug!("{}: state {}->{}", &self.name, self.status.state, new_state);
         }
         if !self.dry_run {
-            self.nvr.update_signals(&moonfire_nvr_client::PostSignalsRequest {
+            let resp = self.nvr.update_signals(&moonfire_nvr_client::PostSignalsRequest {
                 signal_ids: &[self.signal_id],
                 states: &[new_state],
                 start_time_90k: None,
                 end_base: moonfire_nvr_client::PostSignalsEndBase::Now,
                 rel_end_time_90k: Some(30 * 90000),
             }).await?;
+            if self.status.state == new_state {
+                // Just extending prediction, not making changes.
+                debug!("{}: state {}->{}: now={}", &self.name, self.status.state, new_state, resp.time_90k);
+            } else {
+                info!("{}: state {}->{}: now={}", &self.name, self.status.state, new_state, resp.time_90k);
+            }
+        } else {
+            if self.status.state == new_state {
+                // Just extending prediction, not making changes.
+                debug!("{}: state {}->{}: dry run, skipping request", &self.name, self.status.state, new_state);
+            } else {
+                info!("{}: state {}->{}: dry run, skipping request", &self.name, self.status.state, new_state);
+            }
         }
         self.status.as_of = just_before;
         self.status.state = new_state;
