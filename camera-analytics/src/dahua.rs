@@ -174,12 +174,6 @@ impl Watcher {
 
     async fn update_signal(&mut self, new_state: u16) -> Result<(), Error> {
         let just_before = Instant::now();
-        if self.status.state == new_state {
-            // Just a refresh.
-            trace!("{}: state {}->{}", &self.name, self.status.state, new_state);
-        } else {
-            debug!("{}: state {}->{}", &self.name, self.status.state, new_state);
-        }
         if !self.dry_run {
             let resp = self.nvr.update_signals(&moonfire_nvr_client::PostSignalsRequest {
                 signal_ids: &[self.signal_id],
