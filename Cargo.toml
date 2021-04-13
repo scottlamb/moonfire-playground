@@ -4,6 +4,7 @@ members = [
   "avcc",
   "camera-analytics",
   "client",
+  "client-cli",
   "nal-viewer",
   "nvr-analytics",
   "onvif",

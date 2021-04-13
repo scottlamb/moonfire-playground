@@ -1,0 +1,13 @@
+[package]
+name = "client-cli"
+version = "0.1.0"
+authors = ["Scott Lamb <slamb@slamb.org>"]
+edition = "2018"
+
+[dependencies]
+base = { package = "moonfire-base", git = "https://github.com/scottlamb/moonfire-nvr" }
+client = { package = "moonfire-nvr-client", path = "../client" }
+failure = "0.1.5"
+reqwest = { version = "0.11.2", features = ["json"] }
+structopt = "0.3.21"
+tokio = { version = "1.0", features = ["full"] }

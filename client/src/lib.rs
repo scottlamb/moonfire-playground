@@ -187,6 +187,20 @@ pub struct PostSignalsResponse {
     pub time_90k: i64,
 }
 
+#[derive(Debug)]
+pub struct SignalsRequest {
+    pub start: Option<Time>,
+    pub end: Option<Time>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all="camelCase")]
+pub struct SignalsResponse {
+    pub times_90k: Vec<i64>,
+    pub signal_ids: Vec<u32>,
+    pub states: Vec<u16>,
+}
+
 pub struct Client {
     client: reqwest::Client,
     base_url: reqwest::Url,
@@ -231,6 +245,23 @@ impl Client {
         }
         Ok(req
             .json(r)
+            .send().await?
+            .error_for_status()?
+            .json().await?)
+    }
+
+    pub async fn signals(&self, r: &SignalsRequest) -> Result<SignalsResponse, Error> {
+        let mut req = self.client.get(self.base_url.join("/api/signals").unwrap());
+        if let Some(c) = self.cookie.as_ref() {
+            req = req.header(reqwest::header::COOKIE, c.clone());
+        }
+        if let Some(s) = r.start {
+            req = req.query(&[("startTime90k", &s.0.to_string())]);
+        }
+        if let Some(e) = r.end {
+            req = req.query(&[("endTime90k", &e.0.to_string())]);
+        }
+        Ok(req
             .send().await?
             .error_for_status()?
             .json().await?)

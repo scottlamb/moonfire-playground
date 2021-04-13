@@ -273,6 +273,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "client-cli"
+version = "0.1.0"
+dependencies = [
+ "failure",
+ "moonfire-base",
+ "moonfire-nvr-client",
+ "reqwest",
+ "structopt",
+ "tokio",
+]
+
+[[package]]
 name = "console"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
