@@ -1,0 +1,29 @@
+Code=CrossLineDetection;action=Start;index=0;data={
+   "Class" : "Normal",
+   "CountInGroup" : 1,
+   "DetectLine" : [
+      [ 783, 7957 ],
+      [ 5297, 5248 ]
+   ],
+   "Direction" : "RightToLeft",
+   "EventID" : 10785,
+   "GroupID" : 312,
+   "Name" : "door",
+   "Object" : {
+      "Action" : "Appear",
+      "BoundingBox" : [ 3032, 2480, 5048, 8160 ],
+      "Center" : [ 4040, 5320 ],
+      "Confidence" : 0,
+      "LowerBodyColor" : [ 0, 0, 0, 0 ],
+      "MainColor" : [ 0, 0, 0, 0 ],
+      "ObjectID" : 0,
+      "ObjectType" : "Human",
+      "RelativeID" : 0,
+      "Speed" : 0
+   },
+   "PTS" : 43197646010.0,
+   "RuleID" : 6,
+   "Track" : [],
+   "UTC" : 1618245658,
+   "UTCMS" : 883
+}

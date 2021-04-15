@@ -359,35 +359,28 @@ mod tests {
 
     #[test]
     fn parse_time_change() {
-        let raw = concat!("Code=TimeChange;action=Pulse;index=0;data={\n",
-                           "   \"BeforeModifyTime\" : \"2019-02-24 12:25:00\",\n",
-                           "   \"ModifiedTime\" : \"2019-02-24 12:25:00\"\n",
-                           "}\n");
+        let raw = include_str!("testdata/dahua/timechange-pulse");
         assert_eq!(Event::parse(raw).unwrap(), Event {
             code: "TimeChange".to_owned(),
             action: "Pulse".to_owned(),
             index: 0,
             data: Some(json!({
-                "BeforeModifyTime": "2019-02-24 12:25:00",
-                "ModifiedTime": "2019-02-24 12:25:00",
+                "BeforeModifyTime": "2021-04-12 16:39:33",
+                "ModifiedTime": "2021-04-12 16:39:33",
             })),
         });
     }
 
     #[test]
     fn parse_ntp_adjust_time() {
-        let raw = concat!("Code=NTPAdjustTime;action=Pulse;index=0;data={\n",
-                           "   \"Address\" : \"192.168.5.24\",\n",
-                           "   \"Before\" : \"2019-02-24 12:24:59\",\n",
-                           "   \"result\" : true\n",
-                           "}\n");
+        let raw = include_str!("testdata/dahua/ntpadjusttime-pulse");
         assert_eq!(Event::parse(raw).unwrap(), Event {
             code: "NTPAdjustTime".to_owned(),
             action: "Pulse".to_owned(),
             index: 0,
             data: Some(json!({
-                "Address": "192.168.5.24",
-                "Before": "2019-02-24 12:24:59",
+                "Address": "192.168.5.254",
+                "Before": "2021-04-12 16:39:32",
                 "result": true,
             })),
         });
@@ -395,7 +388,7 @@ mod tests {
 
     #[test]
     fn parse_video_motion_info_state() {
-        let raw = "Code=VideoMotionInfo;action=State;index=0";
+        let raw = include_str!("testdata/dahua/videomotioninfo-state");
         assert_eq!(Event::parse(raw).unwrap(), Event {
             code: "VideoMotionInfo".to_owned(),
             action: "State".to_owned(),
@@ -406,30 +399,30 @@ mod tests {
 
     #[test]
     fn parse_video_motion_start() {
-        let raw = concat!("Code=VideoMotion;action=Start;index=0;data={\n",
-                           "   \"RegionName\" : [\"Region1\" ]\n",
-                           "}\n");
+        let raw = include_str!("testdata/dahua/videomotion-start");
         assert_eq!(Event::parse(raw).unwrap(), Event {
             code: "VideoMotion".to_owned(),
             action: "Start".to_owned(),
             index: 0,
             data: Some(json!({
-                "RegionName": ["Region1"],
+                "Id": [0],
+                "RegionName": ["driveway"],
+                "SmartMotionEnable": true,
             })),
         });
     }
 
     #[test]
     fn parse_video_motion_stop() {
-        let raw = concat!("Code=VideoMotion;action=Stop;index=0;data={\n",
-                           "   \"RegionName\" : [\"Region1\" ]\n",
-                           "}\n");
+        let raw = include_str!("testdata/dahua/videomotion-stop");
         assert_eq!(Event::parse(raw).unwrap(), Event {
             code: "VideoMotion".to_owned(),
             action: "Stop".to_owned(),
             index: 0,
             data: Some(json!({
-                "RegionName": ["Region1"],
+                "Id": [0],
+                "RegionName": ["driveway"],
+                "SmartMotionEnable": true,
             })),
         });
     }

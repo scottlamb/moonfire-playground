@@ -1,0 +1,4 @@
+Code=LeFunctionStatusSync;action=Pulse;index=0;data={
+   "Function" : "WightLight",
+   "Status" : false
+}

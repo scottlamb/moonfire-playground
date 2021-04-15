@@ -1,0 +1,5 @@
+Code=NTPAdjustTime;action=Pulse;index=0;data={
+   "Address" : "192.168.5.254",
+   "Before" : "2021-04-12 16:39:32",
+   "result" : true
+}

@@ -1,0 +1,10 @@
+Code=SmartMotionVehicle;action=Stop;index=0;data={
+   "RegionName" : [ "beyond" ],
+   "WindowId" : [ 1 ],
+   "object" : [
+      {
+         "Rect" : [ 6152, 16, 6872, 656 ],
+         "VehicleID" : 7710
+      }
+   ]
+}

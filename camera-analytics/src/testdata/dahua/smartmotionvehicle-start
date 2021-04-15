@@ -1,0 +1,10 @@
+Code=SmartMotionVehicle;action=Start;index=0;data={
+   "RegionName" : [ "beyond" ],
+   "WindowId" : [ 1 ],
+   "object" : [
+      {
+         "Rect" : [ 1600, 64, 3720, 1320 ],
+         "VehicleID" : 7695
+      }
+   ]
+}

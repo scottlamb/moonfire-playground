@@ -1,0 +1,5 @@
+Code=RtspSessionDisconnect;action=Stop;index=0;data={
+   "Device" : "192.168.5.3",
+   "StreamType" : "Main",
+   "UserAgent" : " moonfire-nvr"
+}

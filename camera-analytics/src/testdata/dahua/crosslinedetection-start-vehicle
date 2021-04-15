@@ -1,0 +1,38 @@
+Code=CrossLineDetection;action=Start;index=0;data={
+   "Class" : "Normal",
+   "CountInGroup" : 1,
+   "DetectLine" : [
+      [ 2749, 1378 ],
+      [ 2439, 443 ]
+   ],
+   "Direction" : "LeftToRight",
+   "EventID" : 10861,
+   "GroupID" : 292,
+   "Name" : "traffic",
+   "Object" : {
+      "Action" : "Appear",
+      "BoundingBox" : [ 2128, 0, 4096, 1152 ],
+      "BrandYear" : 0,
+      "CarLogoIndex" : 0,
+      "CarWindow" : {
+         "BoundingBox" : [ 0, 0, 0, 0 ]
+      },
+      "Category" : "Unknown",
+      "Center" : [ 3112, 576 ],
+      "Confidence" : 0,
+      "MainColor" : [ 0, 0, 0, 0 ],
+      "ObjectID" : 7695,
+      "ObjectType" : "Vehicle",
+      "RelativeID" : 0,
+      "Speed" : 0,
+      "SubBrand" : 0,
+      "Text" : "Unknown",
+      "carLenMode" : 0,
+      "carLength" : 0
+   },
+   "PTS" : 43247991240.0,
+   "RuleID" : 7,
+   "Track" : [],
+   "UTC" : 1618296006,
+   "UTCMS" : 776
+}

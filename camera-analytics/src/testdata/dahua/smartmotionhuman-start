@@ -1,0 +1,10 @@
+Code=SmartMotionHuman;action=Start;index=0;data={
+   "RegionName" : [ "Region1" ],
+   "WindowId" : [ 0 ],
+   "object" : [
+      {
+         "HumamID" : 4838,
+         "Rect" : [ 3040, 2000, 4528, 8184 ]
+      }
+   ]
+}
