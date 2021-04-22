@@ -43,6 +43,7 @@ use futures::TryFutureExt;
 use fnv::FnvHashMap;
 use std::future::Future;
 use std::str::FromStr;
+use std::sync::Arc;
 use structopt::StructOpt;
 use uuid::Uuid;
 
@@ -121,7 +122,8 @@ async fn main() {
     let mut h = init_logging();
     let _a = h.async_scope();
     let opt = Opt::from_args();
-    let nvr: &'static _ = Box::leak(Box::new(moonfire_nvr_client::Client::new(opt.nvr, opt.cookie)));
+    let nvr = Arc::new(moonfire_nvr_client::Client::new(opt.nvr, opt.cookie));
+    let (updater, pusher_handle) = moonfire_nvr_client::updater::start_pusher(nvr.clone());
     let top_level = retry_http("get camera configs from nvr",
                                || nvr.top_level(&moonfire_nvr_client::TopLevelRequest {
         days: false,
@@ -140,6 +142,7 @@ async fn main() {
     }
     let cameras_by_uuid: &'static _ = Box::leak(Box::new(cameras_by_uuid));
     let mut handles = Vec::new();
+    handles.push(pusher_handle);
     for s in &top_level.signals {
         let c = match cameras_by_uuid.get(&s.source) {
             None => continue,
@@ -150,18 +153,18 @@ async fn main() {
             let name = c.short_name.clone();
             info!("watching rtsp camera {}", &name);
             handles.push(tokio::task::spawn_blocking({
-                let nvr = nvr.clone();
                 move || {
-                    let mut w = rtsp::Watcher::new(name.clone(), c, nvr, s_id).unwrap();
+                    let mut w = rtsp::Watcher::new(name.clone(), c).unwrap();
                     retry_forever(name, move || w.watch_once());
                 }
             }));
         } else if s.type_ == dahua_uuid {
             let name = c.short_name.clone();
             info!("watching dahua camera {}", &name);
+            let updater = updater.clone();
             handles.push(tokio::spawn(async move {
                 let mut w = dahua::Watcher::new(
-                    name.clone(), c.config.as_ref().unwrap(), nvr, dry_run, s_id).unwrap();
+                    name.clone(), c.config.as_ref().unwrap(), updater, dry_run, s_id).unwrap();
                 loop {
                     if let Err(e) = w.watch_once().await {
                         error!("{}: {:?}", &name, e);
@@ -172,9 +175,10 @@ async fn main() {
         } else if s.type_ == hikvision_uuid {
             let name = c.short_name.clone();
             info!("watching hikvision camera {}", &name);
+            let updater = updater.clone();
             handles.push(tokio::spawn(async move {
                 let mut w = hikvision::Watcher::new(
-                    name.clone(), c.config.as_ref().unwrap(), nvr, dry_run, s_id).unwrap();
+                    name.clone(), c.config.as_ref().unwrap(), updater, dry_run, s_id).unwrap();
                 loop {
                     if let Err(e) = w.watch_once().await {
                         error!("{}: {:?}", &name, e);
@@ -184,6 +188,7 @@ async fn main() {
             }));
         }
     }
+    drop(updater);
     info!("all running");
     futures::future::join_all(handles).await;
 }

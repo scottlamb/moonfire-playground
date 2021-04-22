@@ -1,9 +1,12 @@
 use failure::Error;
+use log::trace;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
 pub use moonfire_base::time::{Time, Duration};
+
+pub mod updater;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all="camelCase")]
@@ -159,14 +162,14 @@ pub struct SignalTypeState {
     pub color: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(tag = "base", content = "rel90k", rename_all = "camelCase")]
 pub enum PostSignalsTimeBase {
     Epoch(Time),
     Now(Duration),
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all="camelCase")]
 pub struct PostSignalsRequest<'a> {
     pub signal_ids: &'a [u32],
@@ -237,6 +240,7 @@ impl Client {
         if let Some(c) = self.cookie.as_ref() {
             req = req.header(reqwest::header::COOKIE, c.clone());
         }
+        trace!("update_signals: {:#?}", &r);
         Ok(req
             .json(r)
             .send().await?

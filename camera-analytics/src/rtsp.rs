@@ -39,14 +39,10 @@ use std::ffi::CString;
 pub struct Watcher {
     name: String,
     url: Url,
-    nvr: &'static moonfire_nvr_client::Client,
-    signal_id: u32,
 }
 
 impl Watcher {
-    pub fn new(name: String, camera: &moonfire_nvr_client::Camera,
-               nvr: &'static moonfire_nvr_client::Client, signal_id: u32)
-               -> Result<Self, Error> {
+    pub fn new(name: String, camera: &moonfire_nvr_client::Camera) -> Result<Self, Error> {
         let camera_config =
             camera.config.as_ref().ok_or_else(|| format_err!("camera {} has no config", &name))?;
         let stream_config =
@@ -61,8 +57,6 @@ impl Watcher {
         Ok(Watcher {
             name,
             url,
-            nvr,
-            signal_id,
         })
     }
 

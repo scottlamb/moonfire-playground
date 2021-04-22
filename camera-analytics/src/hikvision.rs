@@ -49,17 +49,25 @@
 //!      apparently useless.
 
 use bytes::{BufMut, BytesMut};
-use crate::multipart::parts;
+use crate::multipart::{Part, parts};
+use crate::send_with_timeout;
 use failure::{bail, format_err, Error};
 use futures::StreamExt;
-use moonfire_nvr_client::Duration as NvrDuration;
 use reqwest::Client;
 use reqwest::header::{self, HeaderValue};
 use reqwest::Url;
 use mime;
+use std::collections::BTreeMap;
 use std::io::Write;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use xml;
+
+static CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+static IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
+const UNKNOWN: u16 = 0;
+const STILL: u16 = 1;
+const MOVING: u16 = 2;
 
 /// Expected namespace for all XML elements in the response.
 static NAMESPACES: [&'static str; 2] = [
@@ -67,33 +75,22 @@ static NAMESPACES: [&'static str; 2] = [
     "http://www.std-cgi.com/ver10/XMLSchema",    // used by firmware V4.0.9 130306
 ];
 
-/// I/O timeout. The camera sends a few events per second, even when there's nothing to report.
-//static IO_TIMEOUT: Duration = Duration::from_secs(5);
-static UPDATE_INTERVAL: Duration = Duration::from_secs(15);
-
-struct Status {
-    as_of: Instant,
-    motion: bool,
-}
-
 pub struct Watcher {
     name: String,
     client: Client,
+    dry_run: bool,
     url: Url,
     auth: HeaderValue,
-    nvr: &'static moonfire_nvr_client::Client,
-    dry_run: bool,
+    updater: moonfire_nvr_client::updater::SignalUpdaterSender,
     signal_id: u32,
-    status: Option<Status>,
+    status: u16,
 }
 
 impl Watcher {
     pub fn new(name: String, config: &moonfire_nvr_client::CameraConfig,
-               nvr: &'static moonfire_nvr_client::Client, dry_run: bool,
-               signal_id: u32) -> Result<Self, Error> {
-        // TODO: is there a separate connect timeout?
-        let client = Client::builder()
-            .build()?;
+               updater: moonfire_nvr_client::updater::SignalUpdaterSender,
+               dry_run: bool, signal_id: u32) -> Result<Self, Error> {
+        let client = Client::new();
         let h = config.onvif_host.as_ref()
             .ok_or_else(|| format_err!("Hikvision camera {} has no ONVIF host", &name))?;
         Ok(Watcher {
@@ -101,29 +98,36 @@ impl Watcher {
             client,
             url: Url::parse(&format!("http://{}/Event/notification/alertStream", &h))?,
             auth: basic_auth(&config.username, &config.password),
-            nvr,
+            updater,
             dry_run,
             signal_id,
-            status: None,
+            status: UNKNOWN,
         })
     }
 
     pub async fn watch_once(&mut self) -> Result<(), Error> {
+        let e = match self.watch_once_inner().await {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
+        self.update_signal(UNKNOWN);
+        Err(e)
+    }
+
+    async fn watch_once_inner(&mut self) -> Result<(), Error> {
         debug!("{}: watch_once call; url: {}", self.name, self.url);
-        let resp = self.client.get(self.url.clone())
-                              .header(header::AUTHORIZATION, &self.auth)
-                              .send()
+        let resp = send_with_timeout(CONNECT_TIMEOUT,
+                                     self.client.get(self.url.clone()).header(header::AUTHORIZATION, &self.auth))
                               .await?
                               .error_for_status()?;
 
         let mut parts = Box::pin(parts(resp, "mixed", b"")?);
         loop {
-            let p = match parts.next().await {
-                None => return Ok(()),
-                Some(Err(e)) => return Err(e.into()),
-                Some(Ok(p)) => p,
+            let p: Part = match tokio::time::timeout(IDLE_TIMEOUT, parts.next()).await {
+                Ok(None) => bail!("unexpected end of multipart stream"),
+                Ok(Some(v)) => v?,
+                Err(_) => bail!("idle timeout"),
             };
-            let mut motion = self.status.as_ref().map(|s| s.motion);
             let m: mime::Mime = p.headers.get(header::CONTENT_TYPE)
                 .ok_or_else(|| format_err!("Missing part Content-Type"))?
                 .to_str()?
@@ -142,45 +146,26 @@ impl Watcher {
             } else {
                 debug!("{}: notification: {} active={}", self.name, event_type, active);
             }
-            if event_type == "VMD" && active && motion != Some(true) {
-                info!("{}: motion event started", self.name);
-                motion = Some(true);
-            } else if !active && motion != Some(false) {
-                info!("{}: motion event ended", self.name);
-                motion = Some(false);
-            }
-            let motion = match motion {
-                None => continue,  // if we never learned motion state, nothing to do.
-                Some(m) => m,
-            };
-            let now = Instant::now();
-            let need_update = match self.status.as_ref() {
-                None => true,
-                Some(s) => s.motion != motion || now.duration_since(s.as_of) > UPDATE_INTERVAL,
-            };
-            if need_update {
-                self.status = Some(Status {
-                    motion,
-                    as_of: now,
-                });
-                self.update_signal(if motion { 2 } else { 1 }).await?;
+            if event_type == "VMD" && active && self.status != MOVING {
+                self.update_signal(MOVING);
+            } else if !active && self.status != STILL {
+                self.update_signal(STILL);
             }
         }
     }
 
-    async fn update_signal(&self, new_state: u16) -> Result<(), Error> {
-        if self.dry_run {
-            return Ok(());
+    fn update_signal(&mut self, new_state: u16) {
+        if self.status == new_state {
+            return;
         }
-        let req = moonfire_nvr_client::PostSignalsRequest {
-            signal_ids: &[self.signal_id],
-            states: &[new_state],
-            start: moonfire_nvr_client::PostSignalsTimeBase::Now(NvrDuration(0)),
-            end: moonfire_nvr_client::PostSignalsTimeBase::Now(NvrDuration(30 * 90_000)),
-        };
-
-        self.nvr.update_signals(&req).await?;
-        Ok(())
+        info!("{}: state {}->{}", self.name, self.status, new_state);
+        self.status = new_state;
+        if self.dry_run {
+            return;
+        }
+        let mut m = BTreeMap::new();
+        m.insert(self.signal_id, self.status);
+        self.updater.update(m);
     }
 }
 

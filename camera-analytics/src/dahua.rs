@@ -34,28 +34,20 @@ use crate::send_with_timeout;
 use crate::multipart::{Part, parts};
 use failure::{bail, format_err, Error};
 use futures::StreamExt;
-use moonfire_nvr_client::Duration as NvrDuration;
 use reqwest::header::{self, HeaderValue};
 use openssl::hash;
 use regex::Regex;
 use reqwest::Client;
 use reqwest::Url;
-use std::time::Duration;
-use tokio::time::Instant;
+use std::{collections::BTreeMap, time::Duration};
 
 static CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 static IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 static ATTACH_URL: &'static str = "/cgi-bin/eventManager.cgi?action=attach&codes=%5BAll%5D";
-static UPDATE_INTERVAL: Duration = Duration::from_secs(15);
 
 const UNKNOWN: u16 = 0;
 const STILL: u16 = 1;
 const MOVING: u16 = 2;
-struct Status {
-    as_of: Instant,
-    state: u16,
-}
-
 pub struct Watcher {
     name: String,
     client: Client,
@@ -63,14 +55,14 @@ pub struct Watcher {
     url: Url,
     username: String,
     password: String,
-    nvr: &'static moonfire_nvr_client::Client,
+    updater: moonfire_nvr_client::updater::SignalUpdaterSender,
     signal_id: u32,
-    status: Status,
+    status: u16,
 }
 
 impl Watcher {
     pub fn new(name: String, config: &moonfire_nvr_client::CameraConfig,
-               nvr: &'static moonfire_nvr_client::Client, dry_run: bool,
+               updater: moonfire_nvr_client::updater::SignalUpdaterSender, dry_run: bool,
                signal_id: u32) -> Result<Self, Error> {
         let client = Client::builder()
             .build()?;
@@ -79,16 +71,13 @@ impl Watcher {
         Ok(Watcher {
             name,
             client,
+            dry_run,
             url: Url::parse(&format!("http://{}{}", &h, ATTACH_URL))?,
             username: config.username.clone(),
             password: config.password.clone(),
-            nvr,
-            dry_run,
+            updater,
             signal_id,
-            status: Status {
-                as_of: Instant::now(),
-                state: UNKNOWN,
-            }
+            status: UNKNOWN,
         })
     }
 
@@ -97,11 +86,7 @@ impl Watcher {
             Ok(()) => return Ok(()),
             Err(e) => e,
         };
-        if self.status.state != 0 {
-            if let Err(e) = self.update_signal(0).await {
-                warn!("could not reset motion status to 0: {}", e);
-            }
-        }
+        self.update_signal(UNKNOWN);
         Err(e)
     }
 
@@ -129,76 +114,47 @@ impl Watcher {
                            .header(header::AUTHORIZATION, v))
                 .await?;
         }
-        let mut idle_deadline = Instant::now() + IDLE_TIMEOUT;
 
         let resp = resp.error_for_status()?;
         let mut parts = Box::pin(parts(resp, "x-mixed-replace", b"\r\n\r\n")?);
         loop {
-            tokio::select! {
-                biased;
-                p = parts.next() => {
-                    idle_deadline = Instant::now() + IDLE_TIMEOUT; // extend deadline.
-                    let p: Part = match p {
-                        None => bail!("Unexpected end of multipart stream"),
-                        Some(p) => p?,
-                    };
-                    let m = p.headers.get(header::CONTENT_TYPE)
-                        .ok_or_else(|| format_err!("Missing part Content-Type"))?;
-                    if m.as_bytes() != b"text/plain" {
-                        bail!("Unexpected part Content-Type {:?}", m);
-                    }
-                    let body = std::str::from_utf8(&p.body)?;
-                    debug!("{}:\n{}", &self.name, body);
-                    let e = Event::parse(body)?;
-                    trace!("{}: event: {:#?}", &self.name, &e);
-                    if e.code == "SmartMotionHuman" {
-                        let new_state = match e.action.as_str() {
-                            "Start" => MOVING,
-                            "Stop" => STILL,
-                            _ => bail!("can't understand motion event {:#?}", e),
-                        };
-                        if new_state != self.status.state {
-                            self.update_signal(new_state).await?;
-                        }
-                    }
-                },
-                _ = tokio::time::sleep_until(idle_deadline) => {
-                    bail!("No part received in {:?}", IDLE_TIMEOUT);
-                },
-                _ = tokio::time::sleep_until(self.status.as_of + UPDATE_INTERVAL) => {
-                    // Update with current status, extending the prediction.
-                    self.update_signal(self.status.state).await?;
-                },
+            let p: Part = match tokio::time::timeout(IDLE_TIMEOUT, parts.next()).await {
+                Ok(None) => bail!("unexpected end of multipart stream"),
+                Ok(Some(p)) => p?,
+                Err(_) => bail!("idle timeout"),
+            };
+            let m = p.headers.get(header::CONTENT_TYPE)
+                .ok_or_else(|| format_err!("Missing part Content-Type"))?;
+            if m.as_bytes() != b"text/plain" {
+                bail!("Unexpected part Content-Type {:?}", m);
+            }
+            let body = std::str::from_utf8(&p.body)?;
+            debug!("{}:\n{}", &self.name, body);
+            let e = Event::parse(body)?;
+            trace!("{}: event: {:#?}", &self.name, &e);
+            if e.code == "SmartMotionHuman" {
+                let new_state = match e.action.as_str() {
+                    "Start" => MOVING,
+                    "Stop" => STILL,
+                    _ => bail!("can't understand motion event {:#?}", e),
+                };
+                self.update_signal(new_state);
             }
         }
     }
 
-    async fn update_signal(&mut self, new_state: u16) -> Result<(), Error> {
-        let just_before = Instant::now();
-        if !self.dry_run {
-            let resp = self.nvr.update_signals(&moonfire_nvr_client::PostSignalsRequest {
-                signal_ids: &[self.signal_id],
-                states: &[new_state],
-                start: moonfire_nvr_client::PostSignalsTimeBase::Now(NvrDuration(0)),
-                end: moonfire_nvr_client::PostSignalsTimeBase::Now(NvrDuration(30 * 90_000)),
-            }).await?;
-            if self.status.state == new_state {
-                // Just extending prediction, not making changes.
-                debug!("{}: state {}->{}: now={}", &self.name, self.status.state, new_state, resp.time_90k);
-            } else {
-                info!("{}: state {}->{}: now={}", &self.name, self.status.state, new_state, resp.time_90k);
-            }
-        } else {
-            if self.status.state == new_state {
-                // Just extending prediction, not making changes.
-                debug!("{}: state {}->{}: dry run, skipping request", &self.name, self.status.state, new_state);
-            } else {
-                info!("{}: state {}->{}: dry run, skipping request", &self.name, self.status.state, new_state);
-            }
+    fn update_signal(&mut self, new: u16) {
+        if self.status == new {
+            return;
         }
-        self.status.as_of = just_before;
-        self.status.state = new_state;
-        Ok(())
+        info!("{}: state {}->{}", &self.name, self.status, new);
+        self.status = new;
+        if self.dry_run {
+            return;
+        }
+        let mut m = BTreeMap::new();
+        m.insert(self.signal_id, self.status);
+        self.updater.update(m);
     }
 }
 
