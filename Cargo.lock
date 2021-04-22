@@ -966,7 +966,7 @@ dependencies = [
 [[package]]
 name = "moonfire-base"
 version = "0.0.1"
-source = "git+https://github.com/scottlamb/moonfire-nvr#f8d5610e3ed87f903fffd6dde107d5c511d4cb7f"
+source = "git+https://github.com/scottlamb/moonfire-nvr#1e314e09d00e14dc6b5b3b657432e85d17d1c2d2"
 dependencies = [
  "failure",
  "lazy_static",
@@ -974,6 +974,8 @@ dependencies = [
  "log",
  "nom",
  "parking_lot",
+ "serde",
+ "serde_json",
  "time",
 ]
 

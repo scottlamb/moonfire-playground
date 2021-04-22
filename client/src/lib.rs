@@ -44,9 +44,9 @@ pub struct CameraConfig {
 #[serde(rename_all="camelCase")]
 pub struct Stream {
     pub retain_bytes: i64,
-    pub min_start_time_90k: Option<i64>,
-    pub max_end_time_90k: Option<i64>,
-    pub total_duration_90k: i64,
+    pub min_start_time_90k: Option<Time>,
+    pub max_end_time_90k: Option<Time>,
+    pub total_duration_90k: Duration,
     pub total_sample_file_bytes: i64,
 
     pub days: Option<BTreeMap<String, StreamDayValue>>,
@@ -62,9 +62,9 @@ pub struct StreamConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct StreamDayValue {
-    pub start_time_90k: i64,
-    pub end_time_90k: i64,
-    pub total_duration_90k: i64,
+    pub start_time_90k: Time,
+    pub end_time_90k: Time,
+    pub total_duration_90k: Duration,
 }
 
 pub struct ListRecordingsRequest<'a> {
@@ -86,8 +86,8 @@ pub struct ListRecordings {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct Recording {
-    pub start_time_90k: i64,
-    pub end_time_90k: i64,
+    pub start_time_90k: Time,
+    pub end_time_90k: Time,
     pub sample_file_bytes: i64,
     pub video_samples: i64,
     pub video_sample_entry_id: i32,
@@ -160,10 +160,10 @@ pub struct SignalTypeState {
 }
 
 #[derive(Serialize)]
-#[serde(rename_all="camelCase")]
-pub enum PostSignalsEndBase {
-    // Epoch,  // unused for now.
-    Now,
+#[serde(tag = "base", content = "rel90k", rename_all = "camelCase")]
+pub enum PostSignalsTimeBase {
+    Epoch(Time),
+    Now(Duration),
 }
 
 #[derive(Serialize)]
@@ -171,20 +171,14 @@ pub enum PostSignalsEndBase {
 pub struct PostSignalsRequest<'a> {
     pub signal_ids: &'a [u32],
     pub states: &'a [u16],
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub start_time_90k: Option<i64>,
-
-    pub end_base: PostSignalsEndBase,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rel_end_time_90k: Option<i64>,
+    pub start: PostSignalsTimeBase,
+    pub end: PostSignalsTimeBase,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct PostSignalsResponse {
-    pub time_90k: i64,
+    pub time_90k: Time,
 }
 
 #[derive(Debug)]
@@ -196,7 +190,7 @@ pub struct SignalsRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct SignalsResponse {
-    pub times_90k: Vec<i64>,
+    pub times_90k: Vec<Time>,
     pub signal_ids: Vec<u32>,
     pub states: Vec<u16>,
 }

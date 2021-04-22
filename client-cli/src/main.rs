@@ -50,7 +50,7 @@ async fn main() -> Result<(), Error> {
                         continue;
                     }
                 }
-                println!("{}: {}: {}", base::time::Time(time_90k), signal, state);
+                println!("{}: {}: {}", time_90k, signal, state);
            }
         },
     }

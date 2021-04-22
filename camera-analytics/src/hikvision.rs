@@ -52,6 +52,7 @@ use bytes::{BufMut, BytesMut};
 use crate::multipart::parts;
 use failure::{bail, format_err, Error};
 use futures::StreamExt;
+use moonfire_nvr_client::Duration as NvrDuration;
 use reqwest::Client;
 use reqwest::header::{self, HeaderValue};
 use reqwest::Url;
@@ -174,9 +175,8 @@ impl Watcher {
         let req = moonfire_nvr_client::PostSignalsRequest {
             signal_ids: &[self.signal_id],
             states: &[new_state],
-            start_time_90k: None,
-            end_base: moonfire_nvr_client::PostSignalsEndBase::Now,
-            rel_end_time_90k: Some(30 * 90000),
+            start: moonfire_nvr_client::PostSignalsTimeBase::Now(NvrDuration(0)),
+            end: moonfire_nvr_client::PostSignalsTimeBase::Now(NvrDuration(30 * 90_000)),
         };
 
         self.nvr.update_signals(&req).await?;

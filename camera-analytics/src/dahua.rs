@@ -34,6 +34,7 @@ use crate::send_with_timeout;
 use crate::multipart::{Part, parts};
 use failure::{bail, format_err, Error};
 use futures::StreamExt;
+use moonfire_nvr_client::Duration as NvrDuration;
 use reqwest::header::{self, HeaderValue};
 use openssl::hash;
 use regex::Regex;
@@ -178,9 +179,8 @@ impl Watcher {
             let resp = self.nvr.update_signals(&moonfire_nvr_client::PostSignalsRequest {
                 signal_ids: &[self.signal_id],
                 states: &[new_state],
-                start_time_90k: None,
-                end_base: moonfire_nvr_client::PostSignalsEndBase::Now,
-                rel_end_time_90k: Some(30 * 90000),
+                start: moonfire_nvr_client::PostSignalsTimeBase::Now(NvrDuration(0)),
+                end: moonfire_nvr_client::PostSignalsTimeBase::Now(NvrDuration(30 * 90_000)),
             }).await?;
             if self.status.state == new_state {
                 // Just extending prediction, not making changes.
