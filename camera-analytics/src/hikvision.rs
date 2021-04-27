@@ -49,7 +49,7 @@
 //!      apparently useless.
 
 use bytes::{BufMut, BytesMut};
-use crate::multipart::{Part, parts};
+use crate::multipart::{Part, self};
 use crate::send_with_timeout;
 use failure::{bail, format_err, Error};
 use futures::StreamExt;
@@ -58,6 +58,7 @@ use reqwest::header::{self, HeaderValue};
 use reqwest::Url;
 use mime;
 use std::collections::BTreeMap;
+use serde::Deserialize;
 use std::io::Write;
 use std::time::Duration;
 use xml;
@@ -75,7 +76,14 @@ static NAMESPACES: [&'static str; 2] = [
     "http://www.std-cgi.com/ver10/XMLSchema",    // used by firmware V4.0.9 130306
 ];
 
-pub struct Watcher {
+#[derive(Deserialize)]
+#[serde(rename_all="camelCase")]
+pub struct WatcherConfig {
+    camera_name: String,
+    signal_name: String,
+}
+
+struct Watcher {
     name: String,
     client: Client,
     dry_run: bool,
@@ -86,42 +94,46 @@ pub struct Watcher {
     status: u16,
 }
 
-impl Watcher {
-    pub fn new(name: String, config: &moonfire_nvr_client::CameraConfig,
-               updater: moonfire_nvr_client::updater::SignalUpdaterSender,
-               dry_run: bool, signal_id: u32) -> Result<Self, Error> {
-        let client = Client::new();
-        let h = config.onvif_host.as_ref()
-            .ok_or_else(|| format_err!("Hikvision camera {} has no ONVIF host", &name))?;
-        Ok(Watcher {
-            name,
+impl WatcherConfig {
+    pub(crate) fn start(self, ctx: &crate::Context) -> Result<tokio::task::JoinHandle<()>, Error> {
+        let camera = ctx.cameras_by_name.get(self.camera_name.as_str()).ok_or_else(|| format_err!("Hikvision camera {}: no such camera in NVR", &self.camera_name))?;
+        let nvr_config = camera.config.as_ref().ok_or_else(|| format_err!("Dahua camera {}: no config", &self.camera_name))?;
+        let signal = ctx.signals_by_name.get(self.signal_name.as_str()).ok_or_else(|| format_err!("Hikvision camera {}: no such signal {} in NVR", &self.camera_name, &self.signal_name))?;
+        let client = Client::builder()
+            .build()?;
+        let h = nvr_config.onvif_host.as_ref()
+            .ok_or_else(|| format_err!("Hikvision camera {} has no ONVIF host", &self.camera_name))?;
+        let mut w = Watcher {
+            name: self.camera_name,
             client,
             url: Url::parse(&format!("http://{}/Event/notification/alertStream", &h))?,
-            auth: basic_auth(&config.username, &config.password),
-            updater,
-            dry_run,
-            signal_id,
+            auth: basic_auth(&nvr_config.username, &nvr_config.password),
+            updater: ctx.updater.clone(),
+            dry_run: ctx.dry_run,
+            signal_id: signal.id,
             status: UNKNOWN,
-        })
-    }
-
-    pub async fn watch_once(&mut self) -> Result<(), Error> {
-        let e = match self.watch_once_inner().await {
-            Ok(()) => return Ok(()),
-            Err(e) => e,
         };
-        self.update_signal(UNKNOWN);
-        Err(e)
+        Ok(tokio::spawn(async move {
+            loop {
+                if let Err(e) = w.watch_once().await {
+                    w.update_signal(UNKNOWN);
+                    error!("{}: {:?}", &w.name, e);
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            }
+        }))
     }
+}
 
-    async fn watch_once_inner(&mut self) -> Result<(), Error> {
+impl Watcher {
+    async fn watch_once(&mut self) -> Result<(), Error> {
         debug!("{}: watch_once call; url: {}", self.name, self.url);
         let resp = send_with_timeout(CONNECT_TIMEOUT,
                                      self.client.get(self.url.clone()).header(header::AUTHORIZATION, &self.auth))
                               .await?
                               .error_for_status()?;
 
-        let mut parts = Box::pin(parts(resp, "mixed", b"")?);
+        let mut parts = Box::pin(multipart::parse(resp, "mixed")?);
         loop {
             let p: Part = match tokio::time::timeout(IDLE_TIMEOUT, parts.next()).await {
                 Ok(None) => bail!("unexpected end of multipart stream"),

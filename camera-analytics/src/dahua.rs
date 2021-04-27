@@ -31,7 +31,7 @@
 //! Dahua on-camera motion detection.
 
 use crate::send_with_timeout;
-use crate::multipart::{Part, parts};
+use crate::multipart::{Part, self};
 use failure::{bail, format_err, Error};
 use futures::StreamExt;
 use reqwest::header::{self, HeaderValue};
@@ -39,15 +39,214 @@ use openssl::hash;
 use regex::Regex;
 use reqwest::Client;
 use reqwest::Url;
-use std::{collections::BTreeMap, time::Duration};
+use std::collections::BTreeMap;
+use serde::Deserialize;
+use std::time::Duration;
 
 static CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-static IDLE_TIMEOUT: Duration = Duration::from_secs(120);
-static ATTACH_URL: &'static str = "/cgi-bin/eventManager.cgi?action=attach&codes=%5BAll%5D";
+static IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+static ATTACH_URL: &'static str = "/cgi-bin/eventManager.cgi?action=attach&codes=%5BAll%5D&heartbeat=5";
 
 const UNKNOWN: u16 = 0;
 const STILL: u16 = 1;
 const MOVING: u16 = 2;
+
+#[derive(Deserialize)]
+#[serde(rename_all="camelCase")]
+pub struct WatcherConfig {
+    camera_name: String,
+    signals: Vec<SignalConfig>,
+}
+
+#[derive(Copy, Clone, Deserialize)]
+enum MotionType {
+    VideoMotion,
+    SmartMotionHuman,
+    SmartMotionVehicle,
+}
+
+impl MotionType {
+    fn as_str(self) -> &'static str {
+        match self {
+            MotionType::VideoMotion => "VideoMotion",
+            MotionType::SmartMotionHuman => "SmartMotionHuman",
+            MotionType::SmartMotionVehicle => "SmartMotionVehicle",
+        }
+    }
+}
+
+impl Default for MotionType {
+    fn default() -> Self {
+        MotionType::VideoMotion
+    }
+}
+
+#[derive(Copy, Clone, Deserialize)]
+enum IvsType {
+    CrossLineDetection,
+    ParkingDetection,
+}
+
+impl IvsType {
+    fn as_str(self) -> &'static str {
+        match self {
+            IvsType::CrossLineDetection => "CrossLineDetection",
+            IvsType::ParkingDetection => "ParkingDetection",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Deserialize)]
+enum ObjectType {
+    Human,
+    Vehicle,
+}
+
+impl ObjectType {
+    fn as_str(self) -> &'static str {
+        match self {
+            ObjectType::Human => "Human",
+            ObjectType::Vehicle => "Vehicle",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all="camelCase", tag = "type")]
+enum SignalConfig {
+    #[serde(rename_all="camelCase")]
+    Motion {
+        signal_name: String,
+        region: Option<String>,
+
+        #[serde(default)]
+        motion_type: MotionType,
+    },
+    #[serde(rename_all="camelCase")]
+    Ivs {
+        signal_name: String,
+        ivs_type: IvsType,
+        rule_name: String,
+        object_type: Option<ObjectType>,
+    },
+}
+
+/// Given the payload for a motion event, checks if it has the expected region name.
+fn regions_match(m: &serde_json::Map<String, serde_json::Value>, expected: Option<&str>) -> bool {
+    match (m.get("RegionName"), expected) {
+        (None, None) => true,
+        (Some(_), None) => false,
+        (None, Some(_)) => false,
+        (Some(serde_json::Value::Array(ref a)), Some(expected)) => {
+            for r in a {
+                match r {
+                    serde_json::Value::String(ref s) => {
+                        if s == expected {
+                            return true;
+                        }
+                    },
+                    _ => {
+                        warn!("Non-string region in {:?}", a);
+                        continue;
+                    }
+                }
+            }
+            false
+        },
+        (Some(o), _) => {
+            warn!("Motion event with non-array RegionName: {:?}", o);
+            false
+        }
+    }
+}
+
+impl SignalConfig {
+    fn process(&self, e: &Event) -> Option<u16> {
+        match self {
+            SignalConfig::Motion { region, motion_type, .. } => {
+                if e.code.as_str() != motion_type.as_str() {
+                    return None;
+                }
+                let m = match e.data {
+                    Some(serde_json::Value::Object(ref m)) => m,
+                    Some(_) => {
+                        warn!("Motion event of type {} with non-object data: {:?}", &e.code, e.data);
+                        return None;
+                    }
+                    None => {
+                        warn!("Motion event of type {} with no data", &e.code);
+                        return None;
+                    },
+                };
+                if !regions_match(m, region.as_ref().map(|s| s.as_str())) {
+                    return None;
+                }
+            },
+            SignalConfig::Ivs { ivs_type, rule_name, object_type, .. } => {
+                if e.code.as_str() != ivs_type.as_str() {
+                    return None;
+                }
+                let m = match e.data {
+                    Some(serde_json::Value::Object(ref m)) => m,
+                    Some(_) => {
+                        warn!("IVS event of type {} with non-object data: {:?}", &e.code, e.data);
+                        return None;
+                    }
+                    None => {
+                        warn!("IVS event of type {} with no data", &e.code);
+                        return None;
+                    },
+                };
+                match m.get("Name") {
+                    None => {
+                        warn!("IVS event with no rule name: {:?}", m);
+                        return None;
+                    },
+                    Some(name) => {
+                        if name != rule_name {
+                            return None;
+                        }
+                    },
+                }
+                if let Some(object_type) = object_type {
+                    let obj = match m.get("Object") {
+                        None => return None,
+                        Some(serde_json::Value::Object(ref m)) => m,
+                        Some(_) => {
+                            warn!("IVS event of type {} with Object that isn't a JSON object: {:?}", &e.code, &e.data);
+                            return None;
+                        }
+                    };
+                    let t = match obj.get("ObjectType") {
+                        None => return None,
+                        Some(serde_json::Value::String(s)) => s.as_str(),
+                        Some(_) => {
+                            warn!("IVS event of type {} with non-string Object.ObjectType: {:?}", &e.code, &e.data);
+                            return None;
+                        }
+                    };
+                    if t != object_type.as_str() {
+                        return None;
+                    }
+                }
+            }
+        }
+        match e.action.as_str() {
+            "Start" => return Some(MOVING),
+            "Stop" => return Some(STILL),
+            _ => {
+                warn!("Unknown action {}", &e.action);
+                return None;
+            }
+        }
+    }
+}
+
+struct Signal {
+    id: u32,
+    cfg: SignalConfig,
+}
+
 pub struct Watcher {
     name: String,
     client: Client,
@@ -56,41 +255,54 @@ pub struct Watcher {
     username: String,
     password: String,
     updater: moonfire_nvr_client::updater::SignalUpdaterSender,
-    signal_id: u32,
-    status: u16,
+    signals: Vec<Signal>,
+}
+
+impl WatcherConfig {
+    pub(crate) fn start(self, ctx: &crate::Context) -> Result<tokio::task::JoinHandle<()>, Error> {
+        let camera_name = self.camera_name;
+        let camera = ctx.cameras_by_name.get(camera_name.as_str()).ok_or_else(|| format_err!("Dahua camera {}: no such camera in NVR", &camera_name))?;
+        let nvr_config = camera.config.as_ref().ok_or_else(|| format_err!("Dahua camera {}: no config", &camera_name))?;
+        let client = Client::new();
+        let h = nvr_config.onvif_host.as_ref()
+            .ok_or_else(|| format_err!("Dahua camera {} has no ONVIF host", &camera_name))?;
+        let mut signals = Vec::with_capacity(self.signals.len());
+        for cfg in self.signals {
+            let n = match &cfg {
+                SignalConfig::Motion { signal_name, .. } => signal_name.as_str(),
+                SignalConfig::Ivs { signal_name, .. } => signal_name.as_str(),
+            };
+            let nvr_signal = ctx.signals_by_name.get(n).ok_or_else(|| format_err!("Dahua camera {}: no such signal {}", &camera_name, n))?;
+            signals.push(Signal {
+                id: nvr_signal.id,
+                cfg,
+            });
+        }
+        let mut w = Watcher {
+            name: camera_name,
+            client,
+            dry_run: ctx.dry_run,
+            url: Url::parse(&format!("http://{}{}", &h, ATTACH_URL))?,
+            username: nvr_config.username.clone(),
+            password: nvr_config.password.clone(),
+            updater: ctx.updater.clone(),
+            signals,
+        };
+        Ok(tokio::spawn(async move {
+            w.set_all_unknown();
+            loop {
+                if let Err(e) = w.watch_once().await {
+                    w.set_all_unknown();
+                    error!("{}: {:?}", &w.name, e);
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            }
+        }))
+    }
 }
 
 impl Watcher {
-    pub fn new(name: String, config: &moonfire_nvr_client::CameraConfig,
-               updater: moonfire_nvr_client::updater::SignalUpdaterSender, dry_run: bool,
-               signal_id: u32) -> Result<Self, Error> {
-        let client = Client::builder()
-            .build()?;
-        let h = config.onvif_host.as_ref()
-            .ok_or_else(|| format_err!("Dahua camera {} has no ONVIF host", &name))?;
-        Ok(Watcher {
-            name,
-            client,
-            dry_run,
-            url: Url::parse(&format!("http://{}{}", &h, ATTACH_URL))?,
-            username: config.username.clone(),
-            password: config.password.clone(),
-            updater,
-            signal_id,
-            status: UNKNOWN,
-        })
-    }
-
-    pub async fn watch_once(&mut self) -> Result<(), Error> {
-        let e = match self.watch_once_inner().await {
-            Ok(()) => return Ok(()),
-            Err(e) => e,
-        };
-        self.update_signal(UNKNOWN);
-        Err(e)
-    }
-
-    pub async fn watch_once_inner(&mut self) -> Result<(), Error> {
+    async fn watch_once(&mut self) -> Result<(), Error> {
         debug!("{}: watch_once call; url: {}", self.name, self.url);
 
         // Open the URL, giving up after CONNECT_TIMEOUT.
@@ -116,7 +328,7 @@ impl Watcher {
         }
 
         let resp = resp.error_for_status()?;
-        let mut parts = Box::pin(parts(resp, "x-mixed-replace", b"\r\n\r\n")?);
+        let mut parts = Box::pin(multipart::parse(resp, "x-mixed-replace")?);
         loop {
             let p: Part = match tokio::time::timeout(IDLE_TIMEOUT, parts.next()).await {
                 Ok(None) => bail!("unexpected end of multipart stream"),
@@ -129,31 +341,40 @@ impl Watcher {
                 bail!("Unexpected part Content-Type {:?}", m);
             }
             let body = std::str::from_utf8(&p.body)?;
-            debug!("{}:\n{}", &self.name, body);
+            if body == "Heartbeat" {
+                continue;
+            }
             let e = Event::parse(body)?;
+            if e.code == "VideoMotionInfo" { // spammy
+                trace!("{}:\n{}", &self.name, body);
+            } else {
+                debug!("{}:\n{}", &self.name, body);
+            }
             trace!("{}: event: {:#?}", &self.name, &e);
-            if e.code == "SmartMotionHuman" {
-                let new_state = match e.action.as_str() {
-                    "Start" => MOVING,
-                    "Stop" => STILL,
-                    _ => bail!("can't understand motion event {:#?}", e),
-                };
-                self.update_signal(new_state);
+            let mut m = BTreeMap::new();
+            for s in &self.signals {
+                if let Some(new_state) = s.cfg.process(&e) {
+                    m.insert(s.id, new_state);
+                }
+            }
+            if m.is_empty() {
+                continue;
+            }
+            debug!("{}: {:#?}", &self.name, &m);
+            if !self.dry_run {
+                self.updater.update(m);
             }
         }
     }
 
-    fn update_signal(&mut self, new: u16) {
-        if self.status == new {
-            return;
-        }
-        info!("{}: state {}->{}", &self.name, self.status, new);
-        self.status = new;
+    fn set_all_unknown(&self) {
         if self.dry_run {
             return;
         }
         let mut m = BTreeMap::new();
-        m.insert(self.signal_id, self.status);
+        for s in &self.signals {
+            m.insert(s.id, UNKNOWN);
+        }
         self.updater.update(m);
     }
 }

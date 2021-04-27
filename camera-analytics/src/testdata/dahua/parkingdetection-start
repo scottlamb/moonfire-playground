@@ -1,0 +1,43 @@
+Code=ParkingDetection;action=Start;index=0;data={
+   "Class" : "Normal",
+   "ComState" : "ParkingDetection",
+   "CountInGroup" : 1,
+   "CustomParkNo" : "parking",
+   "DetectRegion" : [
+      [ 328, 3636 ],
+      [ 6662, 1056 ],
+      [ 8155, 3281 ],
+      [ 8173, 7796 ],
+      [ 637, 7731 ]
+   ],
+   "EventID" : 10001,
+   "GroupID" : 1,
+   "IndexInGroup" : 1,
+   "Name" : "parking",
+   "Object" : {
+      "Action" : "Appear",
+      "BoundingBox" : [ 224, 1344, 2656, 5840 ],
+      "BrandYear" : 0,
+      "CarLogoIndex" : 0,
+      "CarWindow" : {
+         "BoundingBox" : [ 0, 0, 0, 0 ]
+      },
+      "Category" : "Unknown",
+      "Center" : [ 1440, 3592 ],
+      "Confidence" : 0,
+      "MainColor" : [ 0, 0, 0, 0 ],
+      "ObjectID" : 1,
+      "ObjectType" : "Vehicle",
+      "RelativeID" : 0,
+      "Speed" : 0,
+      "SubBrand" : 0,
+      "Text" : "Unknown",
+      "carLenMode" : 0,
+      "carLength" : 0
+   },
+   "PTS" : 42949429850.0,
+   "RuleID" : 5,
+   "Track" : null,
+   "UTC" : 1619108185,
+   "UTCMS" : 915
+}
