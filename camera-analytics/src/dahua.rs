@@ -34,9 +34,8 @@ use crate::send_with_timeout;
 use crate::multipart::{Part, self};
 use failure::{bail, format_err, Error};
 use futures::StreamExt;
-use reqwest::header::{self, HeaderValue};
-use openssl::hash;
 use regex::Regex;
+use reqwest::header;
 use reqwest::Client;
 use reqwest::Url;
 use std::collections::BTreeMap;
@@ -311,14 +310,13 @@ impl Watcher {
             let v = {
                 let auth = resp.headers().get(header::WWW_AUTHENTICATE)
                     .ok_or_else(|| format_err!("Unauthorized with no WWW-Authenticate"))?;
-                let d = DigestAuthentication::parse(&auth)?;
-                d.create(DigestParams {
-                    method: "GET",
-                    uri: ATTACH_URL,
-                    username: &self.username,
-                    password: &self.password,
-                    cnonce: &random_cnonce(),
-                })
+                let auth = auth.to_str()?;
+                if !auth.starts_with("Digest ") {
+                    bail!("Non-digest auth requested: {}", &auth);
+                }
+                let mut auth = digest_auth::WwwAuthenticateHeader::parse(auth)?;
+                let ctx = digest_auth::AuthContext::new(&self.username, &self.password, self.url.path());
+                auth.respond(&ctx)?.to_string()
             };
             resp = send_with_timeout(
                 CONNECT_TIMEOUT,
@@ -396,68 +394,6 @@ struct DigestParams<'a> {
     cnonce: &'a str,
 }
 
-/// Returns a hex-encoded version of the input.
-fn hex(raw: &[u8]) -> String {
-    const HEX_CHARS: [u8; 16] = [b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7',
-                                 b'8', b'9', b'a', b'b', b'c', b'd', b'e', b'f'];
-    let mut hex = Vec::with_capacity(2 * raw.len());
-    for b in raw {
-        hex.push(HEX_CHARS[((b & 0xf0) >> 4) as usize]);
-        hex.push(HEX_CHARS[( b & 0x0f      ) as usize]);
-    }
-    unsafe { String::from_utf8_unchecked(hex) }
-}
-
-fn h(items: &[&[u8]]) -> String {
-    let mut h = hash::Hasher::new(hash::MessageDigest::md5()).unwrap();
-    for i in items {
-        h.update(i).unwrap();
-    }
-    hex(&h.finish().unwrap())
-}
-
-fn random_cnonce() -> String {
-    let mut raw = [0u8; 16];
-    openssl::rand::rand_bytes(&mut raw).unwrap();
-    hex(&raw[..])
-}
-
-impl<'a> DigestAuthentication<'a> {
-    pub fn parse(h: &'a HeaderValue) -> Result<Self, Error> {
-        lazy_static! {
-            // This of course isn't general, but it works for my camera.
-            // For something general, see:
-            // https://github.com/hyperium/headers/issues/21
-            static ref START_CODE: Regex = Regex::new(
-                "^Digest realm=\"([^\"]*)\", qop=\"(auth)\", nonce=\"([^\"]*)\", \
-                opaque=\"([^\"]*)\"$").unwrap();
-        }
-
-        let h = h.to_str()?;
-        let m = START_CODE.captures(h).ok_or_else(|| format_err!("unparseable WWW-Authenticate"))?;
-        Ok(Self {
-            realm: m.get(1).expect("realm").as_str(),
-            qop: m.get(2).expect("qop").as_str(),
-            nonce: m.get(3).expect("nonce").as_str(),
-            opaque: m.get(4).expect("opaque").as_str(),
-        })
-    }
-
-    fn create(&self, p: DigestParams) -> HeaderValue {
-        let h_a1 = h(&[p.username.as_bytes(), b":", self.realm.as_bytes(), b":", p.password.as_bytes()]);
-        let h_a2 = h(&[p.method.as_bytes(), b":", p.uri.as_bytes()]);
-        let nc = "00000001";
-        let response = h(&[h_a1.as_bytes(), b":",
-                           self.nonce.as_bytes(), b":", nc.as_bytes(), b":", p.cnonce.as_bytes(),
-                           b":", self.qop.as_bytes(), b":", h_a2.as_bytes()]);
-        HeaderValue::from_str(&format!(
-                "Digest username=\"{}\", realm=\"{}\", uri=\"{}\", algorithm={}, nonce=\"{}\", \
-                nc={}, cnonce=\"{}\", qop={}, response=\"{}\", opaque=\"{}\"",
-                p.username, self.realm, p.uri, "MD5", self.nonce, nc, p.cnonce, self.qop, response,
-                self.opaque)).unwrap()
-    }
-}
-
 #[derive(Debug, PartialEq)]
 pub struct Event {
     pub code: String,
@@ -487,52 +423,7 @@ impl Event {
 
 #[cfg(test)]
 mod tests {
-    use reqwest::header::HeaderValue;
     use super::Event;
-
-    #[test]
-    fn parse_www_authenticate() {
-        // Example taken from a live camera.
-        let v = HeaderValue::from_str(
-            "Digest realm=\"Login to 3EPAA7EF4DC8055\", qop=\"auth\", nonce=\"1739884596\", \
-            opaque=\"ce65875b0ce375169e3eab8dfa7cd06b3f5d8d4c\"").unwrap();
-        let a = super::DigestAuthentication::parse(&v).unwrap();
-        assert_eq!(&a, &super::DigestAuthentication {
-            realm: "Login to 3EPAA7EF4DC8055",
-            qop: "auth",
-            nonce: "1739884596",
-            opaque: "ce65875b0ce375169e3eab8dfa7cd06b3f5d8d4c",
-        });
-    }
-
-    #[test]
-    fn create_authorization() {
-        // Example taken from RFC 7616 section 3.9.1.
-        let d = super::DigestAuthentication {
-            realm: "http-auth@example.org",
-            qop: "auth",
-            nonce: "7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v",
-            opaque: "FQhe/qaU925kfnzjCev0ciny7QMkPqMAFRtzCUYo5tdS",
-        };
-        let v = d.create(super::DigestParams {
-            method: "GET",
-            uri: "/dir/index.html",
-            username: "Mufasa",
-            password: "Circle of Life",
-            cnonce: "f2/wE4q74E6zIJEtWaHKaf5wv/H5QzzpXusqGemxURZJ",
-        });
-        assert_eq!(v.to_str().unwrap(),
-                   "Digest username=\"Mufasa\", \
-                   realm=\"http-auth@example.org\", \
-                   uri=\"/dir/index.html\", \
-                   algorithm=MD5, \
-                   nonce=\"7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v\", \
-                   nc=00000001, \
-                   cnonce=\"f2/wE4q74E6zIJEtWaHKaf5wv/H5QzzpXusqGemxURZJ\", \
-                   qop=auth, \
-                   response=\"8ca523f5e9506fed4657c9700eebdbec\", \
-                   opaque=\"FQhe/qaU925kfnzjCev0ciny7QMkPqMAFRtzCUYo5tdS\"");
-    }
 
     #[test]
     fn parse_time_change() {

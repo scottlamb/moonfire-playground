@@ -10,6 +10,7 @@ base64 = "0.13"
 bstr = "0.2.13"
 bytes = "1.0"
 cstr = "0.2"
+digest_auth = "0.2.4"
 failure = "0.1.5"
 fnv = "1.0.6"
 futures = "0.3.5"
@@ -22,7 +23,6 @@ moonfire-ffmpeg = { git = "https://github.com/scottlamb/moonfire-ffmpeg" }
 moonfire-nvr-client = { path = "../client" }
 multipart-stream = "0.1.1"
 mylog = { git = "https://github.com/scottlamb/mylog" }
-openssl = "0.10.16"
 pin-project = "1.0.6"
 pretty-hex = "0.2.1"
 regex = "1.1.0"
