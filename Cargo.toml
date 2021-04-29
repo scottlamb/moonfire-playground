@@ -9,6 +9,7 @@ members = [
   "nvr-analytics",
   "onvif",
   "split-live",
+  "rtsp",
 ]
 
 [profile.release]
