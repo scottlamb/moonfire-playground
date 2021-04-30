@@ -1068,6 +1068,7 @@ dependencies = [
  "futures",
  "h264-reader 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "once_cell",
+ "rtcp",
  "rtp",
  "rtsp-types",
  "sdp",
@@ -1654,6 +1655,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "921904a62e410e37e215c40381b7117f830d9d89ba60ab5236170541dd25646b"
 dependencies = [
  "xmlparser",
+]
+
+[[package]]
+name = "rtcp"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5fb4431b04a948fd91622a75d65a95da3ed2f0be26c902f3d027a23b78fbc96"
+dependencies = [
+ "bytes",
+ "thiserror",
 ]
 
 [[package]]

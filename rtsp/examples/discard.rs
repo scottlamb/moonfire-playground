@@ -1,7 +1,8 @@
 //! Starts a RTSP stream and logs/discards all the packets.
 
-use bytes::Bytes;
-use failure::{Error, format_err};
+use bytes::{Buf, Bytes};
+use failure::{Error, bail, format_err};
+use rtcp::packet::Packet;
 use rtp::packetizer::Marshaller;
 use structopt::StructOpt;
 
@@ -60,7 +61,9 @@ async fn main() -> Result<(), Error> {
     dbg!(&play_resp);
 
     // Read RTP data.
-    let mut prev_by_channel: [Option<rtp::packet::Packet>; 2] = [None, None];
+    let mut prev_rtp: Option<rtp::packet::Packet> = None;
+    let mut prev_sr: Option<rtcp::sender_report::SenderReport> = None;
+    //let mut prev_rtcp: Option<rtcp::packet::Packet> = None;
     let mut timeout = tokio::time::Instant::now() + KEEPALIVE_DURATION;
 
     loop {
@@ -69,22 +72,51 @@ async fn main() -> Result<(), Error> {
                 match msg.ok_or_else(|| format_err!("EOF"))?? {
                     rtsp_types::Message::Data(data) => {
                         let channel = data.channel_id();
-                        let pkt = rtp::packet::Packet::unmarshal(&data.into_body())?;
-                        println!("pkt: channel={} sequence_number={:10} timestamp={:20}", channel, pkt.header.sequence_number, pkt.header.timestamp);
-                        let prev = &mut prev_by_channel[usize::from(channel)];
-                        if let Some(prev) = prev.as_ref() {
-                            if pkt.header.sequence_number == prev.header.sequence_number {
-                                println!("duplicate sequence number: got {:#?} then {:#?}", &prev, &pkt);
-                            } else if pkt.header.sequence_number != prev.header.sequence_number.wrapping_add(1) {
-                                println!("out of sequence: got {:#?} then {:#?}", &prev, &pkt);
+                            if channel == 0 {
+                            let pkt = rtp::packet::Packet::unmarshal(&data.into_body())?;
+                            //println!("rtp pkt: channel={} sequence_number={:10} timestamp={:20}", channel, pkt.header.sequence_number, pkt.header.timestamp);
+                            if let Some(prev) = prev_rtp.as_ref() {
+                                if pkt.header.sequence_number == prev.header.sequence_number {
+                                    println!("duplicate sequence number: got {:#?} then {:#?}", &prev, &pkt);
+                                } else if pkt.header.sequence_number != prev.header.sequence_number.wrapping_add(1) {
+                                    println!("out of sequence: got {:#?} then {:#?}", &prev, &pkt);
+                                }
+                                if pkt.header.timestamp < prev.header.timestamp {
+                                    println!("timestamps non-increasing: got {:#?} then {:#?}", &prev.header, &pkt.header);
+                                }
                             }
-                            if pkt.header.timestamp < prev.header.timestamp {
-                                println!("timestamps non-increasing: got {:#?} then {:#?}", &prev.header, &pkt.header);
+                            prev_rtp = Some(pkt);
+                        } else if channel == 1 {
+                            let mut body = data.into_body();
+                            while !body.is_empty() {
+                                let h = rtcp::header::Header::unmarshal(&body)?;
+                                let pkt_len = (usize::from(h.length) + 1) * 4;
+                                if pkt_len > body.len() {
+                                    bail!("rtcp pkt len {} vs remaining body len {}", pkt_len, body.len());
+                                }
+                                let pkt = body.split_to(pkt_len);
+                                if h.packet_type == rtcp::header::PacketType::SenderReport {
+                                    let pkt = rtcp::sender_report::SenderReport::unmarshal(&pkt)?;
+                                    println!("rtcp sender report, ts={:20} ntp={:20}", pkt.rtp_time, pkt.ntp_time);
+                                    if let Some(prev) = prev_sr.as_ref() {
+                                        if pkt.rtp_time < prev.rtp_time {
+                                            println!("sender report time went backwards. got {:#?} then {:#?}", &prev, &pkt);
+                                        }
+                                    }
+                                    prev_sr = Some(pkt);
+                                } else if h.packet_type == rtcp::header::PacketType::SourceDescription {
+                                    let _pkt = rtcp::source_description::SourceDescription::unmarshal(&pkt)?;
+                                    //println!("rtcp source description: {:#?}", &pkt);
+                                } else {
+                                    println!("rtcp: {:?}", h.packet_type);
+                                }
                             }
+                            //if let Some(prev_rtcp) = prev.as_ref() {
+                            //}
+                            //prev_rtcp = Some(pkt);
                         }
-                        *prev = Some(pkt);
                     },
-                    o => panic!("unexpected message {:#?}", &o),
+                    o => println!("message {:#?}", &o),
                 }
             },
             _ = tokio::time::sleep_until(timeout) => {
