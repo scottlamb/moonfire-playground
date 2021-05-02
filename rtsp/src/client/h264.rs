@@ -7,6 +7,7 @@ use std::convert::TryFrom;
 
 use bytes::{Bytes, BytesMut, Buf, BufMut};
 use failure::{Error, bail, format_err};
+use h264_reader::{annexb::NalReader, nal::{UnitType, sei::SeiIncrementalPayloadReader}};
 
 #[derive(Debug)]
 pub struct NalType {
@@ -87,19 +88,58 @@ pub trait AccessUnitHandler {
     fn end(&mut self) -> Result<(), Error>;
 }
 
-pub struct NopAccessUnitHandler;
+pub struct PrintAccessUnitHandler {
+    ctx: h264_reader::Context<()>,
+    nal_switch: h264_reader::nal::NalSwitch<()>,
+}
 
-impl AccessUnitHandler for NopAccessUnitHandler {
+struct HeaderPrinter;
+
+impl SeiIncrementalPayloadReader for HeaderPrinter {
+    type Ctx = ();
+
+    fn start(&mut self, ctx: &mut h264_reader::Context<Self::Ctx>, payload_type: h264_reader::nal::sei::HeaderType, payload_size: u32) {
+        println!("  SEI payload type={:?} size={}", &payload_type, payload_size);
+    }
+
+    fn push(&mut self, _ctx: &mut h264_reader::Context<Self::Ctx>, _buf: &[u8]) {}
+    fn end(&mut self, _ctx: &mut h264_reader::Context<Self::Ctx>) {}
+    fn reset(&mut self, _ctx: &mut h264_reader::Context<Self::Ctx>) {}
+}
+
+impl PrintAccessUnitHandler {
+    pub fn new(metadata: &Metadata) -> Result<Self, Error> {
+        let config = h264_reader::avcc::AvcDecoderConfigurationRecord::try_from(&metadata.avc_decoder_config[..])
+            .map_err(|e| format_err!("{:?}", e))?;
+        let ctx = config.create_context(())
+            .map_err(|e| format_err!("{:?}", e))?;
+        //let sei_handler = h264_reader::nal::sei::SeiNalHandler::new(HeaderPrinter);
+        let mut nal_switch = h264_reader::nal::NalSwitch::default();
+        //nal_switch.put_handler(h264_reader::nal::UnitType::SEI, Box::new(RefCell::new(sei_handler)));
+        //nal_switch.put_handler(h264_reader::nal::UnitType::SliceLayerWithoutPartitioningIdr, SliceLayerWithoutPartitioningRbsp);
+        Ok(PrintAccessUnitHandler {
+            ctx,
+            nal_switch,
+        })
+    }
+}
+
+impl AccessUnitHandler for PrintAccessUnitHandler {
     fn start(&mut self, _rtsp_ctx: &crate::Context, timestamp: crate::Timestamp, _hdr: &rtp::header::Header) -> Result<(), Error> {
         println!("access unit with timestamp {}:", timestamp);
         Ok(())
     }
 
     fn nal(&mut self, nalu: Bytes) -> Result<(), Error> {
-        let nal_ref_idc = nalu[0] & 0b0110_0000 >> 5;
-        let nal_type_code = nalu[0] & 0b0001_1111;
-        let nal_type = &NAL_TYPES[usize::from(nal_type_code)];
-        println!("  nal ref_idc {} type {:?}", nal_ref_idc, nal_type.as_ref().map(|n| n.name));
+        let nal_header = h264_reader::nal::NalHeader::new(nalu[0]).map_err(|e| format_err!("bad NAL header 0x{:x}: {:#?}", nalu[0], e))?;
+        if nal_header.nal_unit_type() == UnitType::SEI {
+            use pretty_hex::PrettyHex;
+            println!("SEI: {:?}", nalu.hex_dump());
+        }
+        println!("  nal ref_idc {} type {} ({:?})", nal_header.nal_ref_idc(), nal_header.nal_unit_type().id(), nal_header.nal_unit_type());
+        self.nal_switch.start(&mut self.ctx);
+        self.nal_switch.push(&mut self.ctx, &nalu[..]);
+        self.nal_switch.end(&mut self.ctx);
         Ok(())
     }
 

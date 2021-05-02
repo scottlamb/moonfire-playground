@@ -138,8 +138,8 @@ async fn main_inner() -> Result<(), Error> {
     dbg!(&play_resp);
 
     // Read RTP data.
-    let mut nop_au = moonfire_rtsp::client::h264::NopAccessUnitHandler;
-    let mut h264 = moonfire_rtsp::client::h264::Handler::new(&mut nop_au);
+    let mut print_au = moonfire_rtsp::client::h264::PrintAccessUnitHandler::new(&video_metadata)?;
+    let mut h264 = moonfire_rtsp::client::h264::Handler::new(&mut print_au);
     let mut rtp = moonfire_rtsp::client::rtp::StrictSequenceChecker::new(video_ssrc, video_seq, video_rtptime, 90_000, &mut h264);
     let mut prev_sr: Option<rtcp::sender_report::SenderReport> = None;
     //let mut prev_rtcp: Option<rtcp::packet::Packet> = None;
