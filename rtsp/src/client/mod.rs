@@ -1,11 +1,13 @@
 use bytes::{Buf, Bytes};
 use failure::{Error, bail, format_err};
 use futures::{SinkExt, StreamExt};
-use rtsp_types::Message;
 use sdp::session_description::SessionDescription;
 use std::convert::TryFrom;
 use tokio_util::codec::Framed;
 use url::Url;
+
+pub mod rtp;
+pub mod h264;
 
 pub struct Credentials {
     pub username: String,
@@ -18,6 +20,12 @@ pub struct Session {
     stream: Framed<tokio::net::TcpStream, crate::Codec>,
     user_agent: String,
     cseq: u32,
+}
+
+/// Handles data from a RTSP data channel.
+pub trait ChannelHandler {
+    fn data(&mut self, ctx: crate::Context, data: Bytes) -> Result<(), Error>;
+    fn end(&mut self) -> Result<(), Error>;
 }
 
 #[derive(Debug)]
@@ -59,7 +67,17 @@ impl Session {
         let host = url.host_str().ok_or_else(|| format_err!("Must specify host in rtsp url {}", &url))?;
         let port = url.port().unwrap_or(554);
         let stream = tokio::net::TcpStream::connect((host, port)).await?;
-        let stream = Framed::new(stream, crate::Codec {});
+        let established = std::time::SystemTime::now();
+        let local_addr = stream.local_addr()?;
+        let peer_addr = stream.peer_addr()?;
+        let stream = Framed::new(stream, crate::Codec {
+            ctx: crate::Context {
+                established,
+                local_addr,
+                peer_addr,
+                rtsp_message_offset: 0,
+            },
+        });
         Ok(Session {
             creds,
             requested_auth: None,
@@ -74,30 +92,31 @@ impl Session {
     pub async fn send(&mut self, req: &mut rtsp_types::Request<Bytes>) -> Result<rtsp_types::Response<Bytes>, Error> {
         loop {
             let cseq = self.send_nowait(req).await?;
-            let resp = match self.stream.next().await.ok_or_else(|| format_err!("unexpected EOF while waiting for reply"))?? {
-                Message::Response(r) => r,
+            let msg = self.stream.next().await.ok_or_else(|| format_err!("unexpected EOF while waiting for reply"))??;
+            let resp = match msg.msg {
+                rtsp_types::Message::Response(r) => r,
                 o => bail!("Unexpected RTSP message {:?}", &o),
             };
             if !matches!(resp.header(&rtsp_types::headers::CSEQ), Some(v) if v.as_str() == &cseq[..]) {
-                bail!("didn't get expected CSeq {:?} on {:?}", &cseq, &resp);
+                bail!("didn't get expected CSeq {:?} on {:?} at {:#?}", &cseq, &resp, &msg.ctx);
             }
             if resp.status() == rtsp_types::StatusCode::Unauthorized {
                 if self.requested_auth.is_some() {
-                    bail!("Received Unauthorized after trying digest auth");
+                    bail!("Received Unauthorized after trying digest auth at {:#?}", &msg.ctx);
                 }
-                let www_authenticate = resp.header(&rtsp_types::headers::WWW_AUTHENTICATE)
-                    .ok_or_else(|| format_err!("Unauthorized without WWW-Authenticate header"))?;
+                let www_authenticate = match resp.header(&rtsp_types::headers::WWW_AUTHENTICATE) {
+                    None => bail!("Unauthorized without WWW-Authenticate header at {:#?}", &msg.ctx),
+                    Some(h) => h,
+                };
                 let www_authenticate = www_authenticate.as_str();
-                println!("digest auth: {}", www_authenticate);
                 if !www_authenticate.starts_with("Digest ") {
-                    bail!("Non-digest authentication requested");
+                    bail!("Non-digest authentication requested at {:#?}", &msg.ctx);
                 }
                 let www_authenticate = digest_auth::WwwAuthenticateHeader::parse(www_authenticate)?;
-                dbg!(&www_authenticate);
                 self.requested_auth = Some(www_authenticate);
                 continue;
             } else if !resp.status().is_success() {
-                bail!("RTSP {:?} request returned {}", req.method(), resp.status());
+                bail!("RTSP {:?} request returned {} at {:#?}", req.method(), resp.status(), &msg.ctx);
             }
             return Ok(resp);
         }
@@ -120,7 +139,7 @@ impl Session {
         }
         req.insert_header(rtsp_types::headers::CSEQ, cseq.clone());
         req.insert_header(rtsp_types::headers::USER_AGENT, self.user_agent.clone());
-        self.stream.send(Message::Request(req.clone())).await?;
+        self.stream.send(rtsp_types::Message::Request(req.clone())).await?;
         Ok(cseq)
     }
 
@@ -151,7 +170,7 @@ impl Session {
         })
     }
 
-    pub async fn next(&mut self) -> Option<Result<rtsp_types::Message<Bytes>, Error>> {
+    pub async fn next(&mut self) -> Option<Result<crate::Message, Error>> {
         self.stream.next().await
     }
 }

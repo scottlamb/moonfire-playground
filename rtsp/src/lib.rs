@@ -1,7 +1,7 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use failure::bail;
 use once_cell::sync::Lazy;
-use rtsp_types::Message;
+use std::{convert::TryFrom, fmt::{Debug, Display}};
 
 pub mod client;
 
@@ -12,9 +12,58 @@ pub static X_DYNAMIC_RATE: Lazy<rtsp_types::HeaderName> = Lazy::new(
     || rtsp_types::HeaderName::from_static_str("x-Dynamic-Rate").expect("is ascii")
 );
 
-struct Codec {}
+pub struct Message {
+    pub ctx: Context,
+    pub msg: rtsp_types::Message<Bytes>,
+}
 
-fn map_body<Body, NewBody: AsRef<[u8]>, F: FnOnce(Body) -> NewBody>(m: Message<Body>, f: F) -> Message<NewBody> {
+/// A RTP/RTSP timestamp.
+/// The [Display] and [Debug] implementations display:
+/// *   the bottom 32 bits, as seen in RTP packet headers. This advances at a
+///     codec-specified clock rate.
+/// *   the full timestamp, with top bits accumulated as RTP packet timestamps wrap around.
+/// *   a conversion to RTSP "normal play time" (NPT): zero-based and normalized to seconds.
+#[derive(Copy, Clone)]
+pub struct Timestamp {
+    /// The full timestamp, with top bits inferred from RTP timestamp wraparounds.
+    pub timestamp: u64,
+
+    /// The codec-specified clock rate.
+    pub clock_rate: u32,
+
+    /// The stream's starting time, as specified in the RTSP `RTP-Info` header.
+    pub start: u32,
+}
+
+impl Display for Timestamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (mod-2^32: {}), npt {:.03}",
+               self.timestamp, self.timestamp as u32, ((self.timestamp - u64::from(self.start)) as f64) / (self.clock_rate as f64))
+    }
+}
+
+impl Debug for Timestamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(self, f)
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct Context {
+    pub local_addr: std::net::SocketAddr,
+    pub peer_addr: std::net::SocketAddr,
+    pub established: std::time::SystemTime,
+
+    /// The byte position within the input stream. The bottom 32 bits can be compared to the TCP sequence number.
+    pub rtsp_message_offset: u64,
+}
+
+struct Codec {
+    ctx: Context,
+}
+
+fn map_body<Body, NewBody: AsRef<[u8]>, F: FnOnce(Body) -> NewBody>(m: rtsp_types::Message<Body>, f: F) -> rtsp_types::Message<NewBody> {
+    use rtsp_types::Message;
     match m {
         Message::Request(r) => Message::Request(r.map_body(f)),
         Message::Response(r) => Message::Response(r.map_body(f)),
@@ -23,18 +72,22 @@ fn map_body<Body, NewBody: AsRef<[u8]>, F: FnOnce(Body) -> NewBody>(m: Message<B
 }
 
 impl tokio_util::codec::Decoder for Codec {
-    type Item = rtsp_types::Message<bytes::Bytes>;
+    type Item = Message;
     type Error = failure::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         // TODO: zero-copy.
-        let (msg, len): (Message<&[u8]>, _) = match Message::parse(src) {
+        let (msg, len): (rtsp_types::Message<&[u8]>, _) = match rtsp_types::Message::parse(src) {
             Ok((m, l)) => (m, l),
-            Err(rtsp_types::ParseError::Error) => bail!("RTSP parse error"),
+            Err(rtsp_types::ParseError::Error) => bail!("RTSP parse error: {:#?}", &self.ctx),
             Err(rtsp_types::ParseError::Incomplete) => return Ok(None),
         };
-        let msg = map_body(msg, Bytes::copy_from_slice);
+        let msg = Message {
+            ctx: self.ctx,
+            msg: map_body(msg, Bytes::copy_from_slice),
+        };
         src.advance(len);
+        self.ctx.rtsp_message_offset += u64::try_from(len).expect("usize fits in u64");
         Ok(Some(msg))
     }
 }
