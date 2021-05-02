@@ -42,6 +42,37 @@ pub struct Timestamp {
     start: u32,
 }
 
+#[derive(Copy, Clone, PartialEq, PartialOrd, Eq, Ord)]
+pub struct NtpTimestamp(u64);
+
+impl std::fmt::Display for NtpTimestamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sec_since_epoch = ((self.0 >> 32) as u32).wrapping_sub(2_208_988_800);
+        let tm = time::at(time::Timespec {
+            sec: i64::from(sec_since_epoch),
+            nsec: 0,
+        });
+        let ms = (self.0 & 0xFFFF_FFFF) * 1_000 >> 32;
+        let zone_minutes = tm.tm_utcoff.abs() / 60;
+        write!(
+            f,
+            "{}:{:03}{}{:02}:{:02}",
+            tm.strftime("%FT%T").or_else(|_| Err(std::fmt::Error))?,
+            ms,
+            if tm.tm_utcoff > 0 { '+' } else { '-' },
+            zone_minutes / 60,
+            zone_minutes % 60
+        )
+    }
+}
+
+impl std::fmt::Debug for NtpTimestamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Write both the raw and display forms.
+        write!(f, "{} /* {} */", self.0, self)
+    }
+}
+
 impl Timeline {
     pub fn new(start: u32, clock_rate: u32) -> Self {
         Timeline {
