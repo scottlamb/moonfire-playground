@@ -72,7 +72,7 @@ async fn main_inner() -> Result<(), Error> {
     let video_fmtp_params = &video_fmtp[video_fmtp.find(' ').unwrap() + 1..];
     let mut video_metadata = None;
     for p in video_fmtp_params.split(';') {
-        let (key, value) = split_key_value(p).unwrap();
+        let (key, value) = split_key_value(p.trim()).unwrap();
         if key == "sprop-parameter-sets" {
             video_metadata = Some(h264::Metadata::from_sprop_parameter_sets(value)?);
         }
