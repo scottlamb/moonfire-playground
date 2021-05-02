@@ -56,7 +56,7 @@ impl std::fmt::Display for NtpTimestamp {
         let zone_minutes = tm.tm_utcoff.abs() / 60;
         write!(
             f,
-            "{}:{:03}{}{:02}:{:02}",
+            "{}.{:03}{}{:02}:{:02}",
             tm.strftime("%FT%T").or_else(|_| Err(std::fmt::Error))?,
             ms,
             if tm.tm_utcoff > 0 { '+' } else { '-' },
