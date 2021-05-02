@@ -2,6 +2,7 @@
 
 use bytes::Bytes;
 use failure::{Error, bail};
+//use pretty_hex::PrettyHex;
 use rtp::packetizer::Marshaller;
 
 #[derive(Debug)]
@@ -19,8 +20,6 @@ pub trait PacketHandler {
     /// Handles the end of the stream.
     fn end(&mut self) -> Result<(), Error>;
 }
-
-const MAX_TS_JUMP_SECS: u32 = 10;
 
 /// Ensures packets have the correct SSRC, are in sequence with no gaps, and have reasonable timestamps.
 ///
@@ -46,29 +45,21 @@ const MAX_TS_JUMP_SECS: u32 = 10;
 pub struct StrictSequenceChecker<'a> {
     ssrc: u32,
     next_seq: u16,
-    timestamp: crate::Timestamp,
-    max_timestamp_jump: u32,
     inner: &'a mut dyn PacketHandler,
 }
 
 impl<'a> StrictSequenceChecker<'a> {
-    pub fn new(ssrc: u32, next_seq: u16, start_timestamp: u32, clock_rate: u32, inner: &'a mut dyn PacketHandler) -> Self {
+    pub fn new(ssrc: u32, next_seq: u16, inner: &'a mut dyn PacketHandler) -> Self {
         Self {
             ssrc,
             next_seq,
-            timestamp: crate::Timestamp {
-                timestamp: u64::from(start_timestamp),
-                start: start_timestamp,
-                clock_rate,
-            },
-            max_timestamp_jump: MAX_TS_JUMP_SECS * clock_rate,
             inner,
         }
     }
 }
 
 impl<'a> super::ChannelHandler for StrictSequenceChecker<'a> {
-    fn data(&mut self, rtsp_ctx: crate::Context, data: Bytes) -> Result<(), Error> {
+    fn data(&mut self, rtsp_ctx: crate::Context, timeline: &mut crate::Timeline, data: Bytes) -> Result<(), Error> {
         let pkt = match rtp::packet::Packet::unmarshal(&data) {
             Err(e) => bail!("corrupt RTP packet while expecting seq={:04x} at {:#?}: {}", self.next_seq, &rtsp_ctx, e),
             Ok(p) => p,
@@ -76,34 +67,16 @@ impl<'a> super::ChannelHandler for StrictSequenceChecker<'a> {
         if pkt.header.ssrc != self.ssrc || pkt.header.sequence_number != self.next_seq {
             bail!("Expected ssrc={:08x} seq={:04x} got ssrc={:08x} seq={:04x} at {:#?}", self.ssrc, self.next_seq, pkt.header.ssrc, pkt.header.sequence_number, &rtsp_ctx);
         }
-        // TODO: error on u64 overflow.
-        let ts_high_bits = self.timestamp.timestamp & 0xFFFF_FFFF_0000_0000;
-        let new_ts = match pkt.header.timestamp < (self.timestamp.timestamp as u32) {
-            true  => ts_high_bits + 1u64<<32 + u64::from(pkt.header.timestamp),
-            false => ts_high_bits + u64::from(pkt.header.timestamp),
+        let timestamp = match timeline.advance(pkt.header.timestamp) {
+            Ok(ts) => ts,
+            Err(e) => return Err(e.context(format!("timestamp error in seq={:04x} {:#?}", pkt.header.sequence_number, &rtsp_ctx)).into()),
         };
-        let forward_ts = crate::Timestamp {
-            timestamp: new_ts,
-            clock_rate: self.timestamp.clock_rate,
-            start: self.timestamp.start,
-        };
-        let forward_delta = forward_ts.timestamp - self.timestamp.timestamp;
-        if forward_delta > u64::from(self.max_timestamp_jump) {
-            let backward_ts = crate::Timestamp {
-                timestamp: ts_high_bits + (self.timestamp.timestamp & 0xFFFF_FFFF) - (pkt.header.timestamp as u64),
-                clock_rate: self.timestamp.clock_rate,
-                start: self.timestamp.start,
-            };
-            bail!("Timestamp jumped (forward by {} from {} to {}, more than allowed {} sec OR backward by {} from {} to {}) at seq={:04x} {:#?}",
-                  forward_delta, self.timestamp, new_ts, MAX_TS_JUMP_SECS,
-                  self.timestamp.timestamp - backward_ts.timestamp, self.timestamp, backward_ts,
-                  pkt.header.sequence_number, &rtsp_ctx);
-        }
+        //println!("pkt{} seq={:04x} ts={}", if pkt.header.marker { "   " } else { "(M)"}, self.next_seq, &timestamp);
+        //println!("{:?}", data.hex_dump());
         self.next_seq = self.next_seq.wrapping_add(1);
-        self.timestamp = forward_ts;
         self.inner.pkt(Packet {
             rtsp_ctx,
-            timestamp: self.timestamp,
+            timestamp,
             pkt
         })
     }

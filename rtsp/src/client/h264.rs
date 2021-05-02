@@ -98,7 +98,7 @@ struct HeaderPrinter;
 impl SeiIncrementalPayloadReader for HeaderPrinter {
     type Ctx = ();
 
-    fn start(&mut self, ctx: &mut h264_reader::Context<Self::Ctx>, payload_type: h264_reader::nal::sei::HeaderType, payload_size: u32) {
+    fn start(&mut self, _ctx: &mut h264_reader::Context<Self::Ctx>, payload_type: h264_reader::nal::sei::HeaderType, payload_size: u32) {
         println!("  SEI payload type={:?} size={}", &payload_type, payload_size);
     }
 
@@ -114,7 +114,7 @@ impl PrintAccessUnitHandler {
         let ctx = config.create_context(())
             .map_err(|e| format_err!("{:?}", e))?;
         //let sei_handler = h264_reader::nal::sei::SeiNalHandler::new(HeaderPrinter);
-        let mut nal_switch = h264_reader::nal::NalSwitch::default();
+        let nal_switch = h264_reader::nal::NalSwitch::default();
         //nal_switch.put_handler(h264_reader::nal::UnitType::SEI, Box::new(RefCell::new(sei_handler)));
         //nal_switch.put_handler(h264_reader::nal::UnitType::SliceLayerWithoutPartitioningIdr, SliceLayerWithoutPartitioningRbsp);
         Ok(PrintAccessUnitHandler {

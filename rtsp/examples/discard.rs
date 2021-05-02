@@ -3,7 +3,6 @@
 use bytes::Bytes;
 use failure::{Error, bail, format_err};
 use moonfire_rtsp::client::{ChannelHandler, h264};
-use rtcp::packet::Packet;
 use std::fmt::Write;
 use structopt::StructOpt;
 
@@ -139,10 +138,10 @@ async fn main_inner() -> Result<(), Error> {
 
     // Read RTP data.
     let mut print_au = moonfire_rtsp::client::h264::PrintAccessUnitHandler::new(&video_metadata)?;
+    let mut h264_timeline = moonfire_rtsp::Timeline::new(video_rtptime, 90_000);
     let mut h264 = moonfire_rtsp::client::h264::Handler::new(&mut print_au);
-    let mut rtp = moonfire_rtsp::client::rtp::StrictSequenceChecker::new(video_ssrc, video_seq, video_rtptime, 90_000, &mut h264);
-    let mut prev_sr: Option<rtcp::sender_report::SenderReport> = None;
-    //let mut prev_rtcp: Option<rtcp::packet::Packet> = None;
+    let mut h264_rtp = moonfire_rtsp::client::rtp::StrictSequenceChecker::new(video_ssrc, video_seq, &mut h264);
+    let mut h264_rtcp = moonfire_rtsp::client::rtcp::TimestampPrinter::new();
     let mut timeout = tokio::time::Instant::now() + KEEPALIVE_DURATION;
 
     loop {
@@ -151,37 +150,10 @@ async fn main_inner() -> Result<(), Error> {
                 let msg = msg.ok_or_else(|| format_err!("EOF"))??;
                 match msg.msg {
                     rtsp_types::Message::Data(data) => {
-                        let channel = data.channel_id();
-                        if channel == 0 {
-                            rtp.data(msg.ctx, data.into_body())?;
-                        } else if channel == 1 {
-                            let mut body = data.into_body();
-                            while !body.is_empty() {
-                                let h = rtcp::header::Header::unmarshal(&body)?;
-                                let pkt_len = (usize::from(h.length) + 1) * 4;
-                                if pkt_len > body.len() {
-                                    bail!("rtcp pkt len {} vs remaining body len {} at {:#?}", pkt_len, body.len(), &msg.ctx);
-                                }
-                                let pkt = body.split_to(pkt_len);
-                                if h.packet_type == rtcp::header::PacketType::SenderReport {
-                                    let pkt = rtcp::sender_report::SenderReport::unmarshal(&pkt)?;
-                                    println!("rtcp sender report, ts={:20} ntp={:20}", pkt.rtp_time, pkt.ntp_time);
-                                    if let Some(prev) = prev_sr.as_ref() {
-                                        if pkt.rtp_time < prev.rtp_time {
-                                            println!("sender report time went backwards. got {:#?} then {:#?} at {:#?}", &prev, &pkt, &msg.ctx);
-                                        }
-                                    }
-                                    prev_sr = Some(pkt);
-                                } else if h.packet_type == rtcp::header::PacketType::SourceDescription {
-                                    let _pkt = rtcp::source_description::SourceDescription::unmarshal(&pkt)?;
-                                    //println!("rtcp source description: {:#?}", &pkt);
-                                } else {
-                                    println!("rtcp: {:?}", h.packet_type);
-                                }
-                            }
-                            //if let Some(prev_rtcp) = prev.as_ref() {
-                            //}
-                            //prev_rtcp = Some(pkt);
+                        match data.channel_id() {
+                            0 => h264_rtp.data(msg.ctx, &mut h264_timeline, data.into_body())?,
+                            1 => h264_rtcp.data(msg.ctx, &mut h264_timeline, data.into_body())?,
+                            o => bail!("Data message on unexpected channel {} at {:#?}", o, &msg.ctx),
                         }
                     },
                     o => println!("message {:#?}", &o),

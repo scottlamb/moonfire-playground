@@ -6,6 +6,7 @@ use std::convert::TryFrom;
 use tokio_util::codec::Framed;
 use url::Url;
 
+pub mod rtcp;
 pub mod rtp;
 pub mod h264;
 
@@ -24,7 +25,7 @@ pub struct Session {
 
 /// Handles data from a RTSP data channel.
 pub trait ChannelHandler {
-    fn data(&mut self, ctx: crate::Context, data: Bytes) -> Result<(), Error>;
+    fn data(&mut self, ctx: crate::Context, timeline: &mut crate::Timeline, data: Bytes) -> Result<(), Error>;
     fn end(&mut self) -> Result<(), Error>;
 }
 
