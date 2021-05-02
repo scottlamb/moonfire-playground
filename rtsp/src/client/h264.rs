@@ -3,8 +3,10 @@
 //! iterate the NALs, not re-encode them in Annex B format.
 //! https://docs.rs/rtp/0.2.2/rtp/codecs/h264/struct.H264Packet.html
 
+use std::convert::TryFrom;
+
 use bytes::{Bytes, BytesMut, Buf, BufMut};
-use failure::{Error, bail};
+use failure::{Error, bail, format_err};
 
 #[derive(Debug)]
 pub struct NalType {
@@ -183,9 +185,8 @@ impl<'a> super::rtp::PacketHandler for Handler<'a> {
                 let end      = (fu_header & 0b01000000) != 0;
                 let reserved = (fu_header & 0b00100000) != 0;
                 let nal_header = (nal_header & 0b011100000) | (fu_header & 0b00011111);
-                //println!("seq {:04x} FU-A, {:08b} {:08b}", seq, nal_header, fu_header);
                 if (start && end) || reserved {
-                    bail!("Invalid FU-A header {:x} at seq {:04x} {:#?}", fu_header, seq, &pkt.rtsp_ctx);
+                    bail!("Invalid FU-A header {:08b} at seq {:04x} {:#?}", fu_header, seq, &pkt.rtsp_ctx);
                 }
                 match (start, premark.frag_buf.take()) {
                     (true, Some(_)) => bail!("FU-A with start bit while frag in progress at seq {:04x} {:#?}", seq, &pkt.rtsp_ctx),
@@ -222,5 +223,129 @@ impl<'a> super::rtp::PacketHandler for Handler<'a> {
             self.state = State::PreMark(premark);
         }
         Ok(())
+    }
+}
+
+/// Decodes a NAL unit (minus header byte) into its RBSP.
+/// Stolen from h264-reader's src/avcc.rs. This shouldn't last long, see:
+/// <https://github.com/dholroyd/h264-reader/issues/4>.
+fn decode(encoded: &[u8]) -> Vec<u8> {
+    struct NalRead(Vec<u8>);
+    use h264_reader::nal::NalHandler;
+    use h264_reader::Context;
+    impl NalHandler for NalRead {
+        type Ctx = ();
+        fn start(&mut self, _ctx: &mut Context<Self::Ctx>, _header: h264_reader::nal::NalHeader) {}
+
+        fn push(&mut self, _ctx: &mut Context<Self::Ctx>, buf: &[u8]) {
+            self.0.extend_from_slice(buf)
+        }
+
+        fn end(&mut self, _ctx: &mut Context<Self::Ctx>) {}
+    }
+    let mut decode = h264_reader::rbsp::RbspDecoder::new(NalRead(vec![]));
+    let mut ctx = Context::new(());
+    decode.push(&mut ctx, encoded);
+    let read = decode.into_handler();
+    read.0
+}
+
+#[derive(Clone)]
+pub struct Metadata {
+    pub width: u32,
+    pub height: u32,
+    pub rfc6381_codec: String,
+    pub pasp: Option<(u16, u16)>,
+    pub avc_decoder_config: Vec<u8>,
+}
+
+impl std::fmt::Debug for Metadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use pretty_hex::PrettyHex;
+        f.debug_struct("Metadata")
+         .field("width", &self.width)
+         .field("height", &self.height)
+         .field("rfc6381_codec", &self.rfc6381_codec)
+         .field("pasp", &self.pasp)
+         .field("avc_decoder_config", &self.avc_decoder_config.hex_dump())
+         .finish()
+    }
+}
+
+impl Metadata {
+    /// Parses metadata from the `sprop-parameter-sets` of a SDP `fmtp` media attribute.
+    pub fn from_sprop_parameter_sets(sprop_parameter_sets: &str) -> Result<Self, Error> {
+        let mut sps_nal = None;
+        let mut pps_nal = None;
+        for nal in sprop_parameter_sets.split(',') {
+            let nal = base64::decode(nal)?;
+            if nal.is_empty() {
+                bail!("empty NAL");
+            }
+            let header = h264_reader::nal::NalHeader::new(nal[0]).map_err(|_| format_err!("bad NAL header {:0x}", nal[0]))?;
+            match header.nal_unit_type() {
+                h264_reader::nal::UnitType::SeqParameterSet => {
+                    if sps_nal.is_some() {
+                        bail!("multiple SPSs");
+                    }
+                    sps_nal = Some(nal);
+                },
+                h264_reader::nal::UnitType::PicParameterSet => {
+                    if pps_nal.is_some() {
+                        bail!("multiple PPSs");
+                    }
+                    pps_nal = Some(nal);
+                },
+                _ => bail!("only SPS and PPS expected in parameter sets"),
+            }
+        }
+        let sps_nal = sps_nal.ok_or_else(|| format_err!("no sps"))?;
+        let pps_nal = pps_nal.ok_or_else(|| format_err!("no pps"))?;
+        let sps_rbsp = decode(&sps_nal[1..]);
+        if sps_rbsp.len() < 4 {
+            bail!("bad sps");
+        }
+        let rfc6381_codec = format!("avc1.{:02X}{:02X}{:02X}", sps_rbsp[0], sps_rbsp[1], sps_rbsp[2]);
+        let sps = h264_reader::nal::sps::SeqParameterSet::from_bytes(&sps_rbsp)
+            .map_err(|e| format_err!("Bad SPS: {:?}", e))?;
+
+        let pixel_dimensions = sps.pixel_dimensions().map_err(|e| format_err!("SPS has invalid pixel dimensions: {:?}", e))?;
+
+        // Create the AVCDecoderConfiguration, ISO/IEC 14496-15 section 5.2.4.1.
+        // The beginning of the AVCDecoderConfiguration takes a few values from
+        // the SPS (ISO/IEC 14496-10 section 7.3.2.1.1).
+        let mut avc_decoder_config = Vec::with_capacity(11 + sps_nal.len() + pps_nal.len());
+        avc_decoder_config.push(1); // configurationVersion
+        avc_decoder_config.extend(&sps_rbsp[0..=2]); // profile_idc . AVCProfileIndication
+                                                     // ...misc bits... . profile_compatibility
+                                                     // level_idc . AVCLevelIndication
+
+        // Hardcode lengthSizeMinusOne to 3, matching TransformSampleData's 4-byte
+        // lengths.
+        avc_decoder_config.push(0xff);
+
+        // Only support one SPS and PPS.
+        // ffmpeg's ff_isom_write_avcc has the same limitation, so it's probably
+        // fine. This next byte is a reserved 0b111 + a 5-bit # of SPSs (1).
+        avc_decoder_config.push(0xe1);
+        avc_decoder_config.extend(&u16::try_from(sps_nal.len())?.to_be_bytes()[..]);
+        avc_decoder_config.extend_from_slice(&sps_nal[..]);
+        avc_decoder_config.push(1); // # of PPSs.
+        avc_decoder_config.extend(&u16::try_from(pps_nal.len())?.to_be_bytes()[..]);
+        avc_decoder_config.extend_from_slice(&pps_nal[..]);
+        assert_eq!(avc_decoder_config.len(), 11 + sps_nal.len() + pps_nal.len());
+
+        let pasp = sps
+            .vui_parameters
+            .as_ref()
+            .and_then(|v| v.aspect_ratio_info.as_ref())
+            .and_then(|a| a.clone().get());
+        Ok(Metadata {
+            avc_decoder_config,
+            width: pixel_dimensions.0,
+            height: pixel_dimensions.1,
+            rfc6381_codec,
+            pasp,
+        })
     }
 }

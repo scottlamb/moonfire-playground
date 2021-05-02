@@ -105,7 +105,7 @@ name = "avcc"
 version = "0.1.0"
 dependencies = [
  "failure",
- "h264-reader 0.4.0 (git+https://github.com/scottlamb/h264-reader?branch=more-public-fields)",
+ "h264-reader",
  "pretty-hex",
  "rusqlite",
  "structopt",
@@ -669,16 +669,6 @@ dependencies = [
 [[package]]
 name = "h264-reader"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c008119575fd271e19fead91ca81c5b5031f8026deb6bcf06497d80ee0ba273"
-dependencies = [
- "bitreader",
- "memchr",
-]
-
-[[package]]
-name = "h264-reader"
-version = "0.4.0"
 source = "git+https://github.com/scottlamb/h264-reader?branch=more-public-fields#f3d8aa6c8b0d9d145c378c1af316522c8897f7aa"
 dependencies = [
  "bitreader",
@@ -1062,13 +1052,14 @@ dependencies = [
 name = "moonfire-rtsp"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "bytes",
  "digest_auth",
  "failure",
  "futures",
- "h264-reader 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "h264-reader",
  "once_cell",
- "regex",
+ "pretty-hex",
  "rtcp",
  "rtp",
  "rtsp-types",
@@ -1124,7 +1115,7 @@ name = "nal-viewer"
 version = "0.1.0"
 dependencies = [
  "failure",
- "h264-reader 0.4.0 (git+https://github.com/scottlamb/h264-reader?branch=more-public-fields)",
+ "h264-reader",
  "pretty-hex",
  "structopt",
 ]

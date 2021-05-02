@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use failure::{Error, bail, format_err};
-use moonfire_rtsp::client::ChannelHandler;
+use moonfire_rtsp::client::{ChannelHandler, h264};
 use rtcp::packet::Packet;
 use std::fmt::Write;
 use structopt::StructOpt;
@@ -47,6 +47,10 @@ async fn main() {
     }
 }
 
+fn split_key_value(keyvalue: &str) -> Option<(&str, &str)> {
+    keyvalue.find('=').map(|p| (&keyvalue[0..p], &keyvalue[p+1..]))
+}
+
 async fn main_inner() -> Result<(), Error> {
     let opt = Opt::from_args();
     let mut cli = moonfire_rtsp::client::Session::connect(&opt.url, Some(moonfire_rtsp::client::Credentials {
@@ -65,6 +69,18 @@ async fn main_inner() -> Result<(), Error> {
     let video = describe.sdp.media_descriptions.first().expect("has a media description");
     assert_eq!(video.media_name.media, "video");  // TODO: not guaranteed this is first.
     let video_control_url_str = video.attribute("control").expect("has control attribute");
+    let video_fmtp = video.attribute("fmtp").expect("has fmtp");
+    let video_fmtp_params = &video_fmtp[video_fmtp.find(' ').unwrap() + 1..];
+    let mut video_metadata = None;
+    for p in video_fmtp_params.split(';') {
+        let (key, value) = split_key_value(p).unwrap();
+        if key == "sprop-parameter-sets" {
+            video_metadata = Some(h264::Metadata::from_sprop_parameter_sets(value)?);
+        }
+    }
+    let video_metadata = video_metadata.unwrap();
+    dbg!(&video_metadata);
+
     let video_control_url = describe.base_url.join(video_control_url_str).unwrap();
 
     // SETUP. https://tools.ietf.org/html/rfc2326#section-10.4
@@ -109,8 +125,7 @@ async fn main_inner() -> Result<(), Error> {
            continue;
         }
         for part in parts {
-            let mut keyvalue = part.splitn(2, '=');
-            let (key, value) = (keyvalue.next().unwrap(), keyvalue.next().unwrap());
+            let (key, value) = split_key_value(part).unwrap();
             match key {
                 "seq" => video_seq = Some(u16::from_str_radix(value, 10).unwrap()),
                 "rtptime" => video_rtptime = Some(u32::from_str_radix(value, 10).unwrap()),
