@@ -3,54 +3,11 @@
 //! iterate the NALs, not re-encode them in Annex B format.
 //! https://docs.rs/rtp/0.2.2/rtp/codecs/h264/struct.H264Packet.html
 
-use std::convert::TryFrom;
+use std::{cell::RefCell, convert::TryFrom};
 
 use bytes::{Bytes, BytesMut, Buf, BufMut};
 use failure::{Error, bail, format_err};
-use h264_reader::{annexb::NalReader, nal::{UnitType, sei::SeiIncrementalPayloadReader}};
-
-#[derive(Debug)]
-pub struct NalType {
-    pub name: &'static str,
-    pub is_vcl: bool,
-}
-
-// See Table 7-1, PDF page 85 of
-// [ISO/IEC 14496-10:2014(E)](https://github.com/scottlamb/moonfire-nvr/wiki/Standards-and-specifications#video-codecs).
-pub const NAL_TYPES: [Option<NalType>; 32] = [
-    /*  0 */ None,
-    /*  1 */ Some(NalType { name: "slice_layer_without_partitioning", is_vcl: true }),
-    /*  2 */ Some(NalType { name: "slice_data_partition_a_layer",     is_vcl: true }),
-    /*  3 */ Some(NalType { name: "slice_data_partition_b_layer",     is_vcl: true }),
-    /*  4 */ Some(NalType { name: "slice_data_partition_c_layer",     is_vcl: true }),
-    /*  5 */ Some(NalType { name: "slice_layer_without_partitioning", is_vcl: true }),
-    /*  6 */ Some(NalType { name: "sei",                              is_vcl: false }),
-    /*  7 */ Some(NalType { name: "seq_parameter_set",                is_vcl: false }),
-    /*  8 */ Some(NalType { name: "pic_parameter_set",                is_vcl: false }),
-    /*  9 */ Some(NalType { name: "access_unit_delimiter",            is_vcl: false }),
-    /* 10 */ Some(NalType { name: "end_of_seq",                       is_vcl: false }),
-    /* 11 */ Some(NalType { name: "end_of_stream",                    is_vcl: false }),
-    /* 12 */ Some(NalType { name: "filler_data",                      is_vcl: false }),
-    /* 13 */ Some(NalType { name: "seq_parameter_set_extension",      is_vcl: false }),
-    /* 14 */ Some(NalType { name: "prefix_nal_unit",                  is_vcl: false }),
-    /* 15 */ Some(NalType { name: "subset_seq_parameter_set",         is_vcl: false }),
-    /* 16 */ Some(NalType { name: "depth_parameter_set",              is_vcl: false }),
-    /* 17 */ None,
-    /* 18 */ None,
-    /* 19 */ Some(NalType { name: "slice_layer_without_partitioning", is_vcl: false }),
-    /* 20 */ Some(NalType { name: "slice_layer_extension",            is_vcl: false }),
-    /* 21 */ Some(NalType { name: "slice_layer_extension_for_3d",     is_vcl: false }),
-    /* 22 */ None,
-    /* 23 */ None,
-    /* 24 */ None,
-    /* 25 */ None,
-    /* 26 */ None,
-    /* 27 */ None,
-    /* 28 */ None,
-    /* 29 */ None,
-    /* 30 */ None,
-    /* 31 */ None,
-];
+use h264_reader::{annexb::NalReader, nal::{UnitType, sei::SeiIncrementalPayloadReader, slice::SliceLayerWithoutPartitioningRbsp}};
 
 /// A [super::rtp::PacketHandler] implementation which breaks H.264 data into access units and NALs.
 /// Currently expects that the stream starts at an access unit boundary and has no lost packets.
@@ -114,9 +71,10 @@ impl PrintAccessUnitHandler {
         let ctx = config.create_context(())
             .map_err(|e| format_err!("{:?}", e))?;
         //let sei_handler = h264_reader::nal::sei::SeiNalHandler::new(HeaderPrinter);
-        let nal_switch = h264_reader::nal::NalSwitch::default();
+        let mut nal_switch = h264_reader::nal::NalSwitch::default();
         //nal_switch.put_handler(h264_reader::nal::UnitType::SEI, Box::new(RefCell::new(sei_handler)));
-        //nal_switch.put_handler(h264_reader::nal::UnitType::SliceLayerWithoutPartitioningIdr, SliceLayerWithoutPartitioningRbsp);
+        nal_switch.put_handler(h264_reader::nal::UnitType::SliceLayerWithoutPartitioningIdr, Box::new(RefCell::new(SliceLayerWithoutPartitioningRbsp::default())));
+        nal_switch.put_handler(h264_reader::nal::UnitType::SliceLayerWithoutPartitioningNonIdr, Box::new(RefCell::new(SliceLayerWithoutPartitioningRbsp::default())));
         Ok(PrintAccessUnitHandler {
             ctx,
             nal_switch,

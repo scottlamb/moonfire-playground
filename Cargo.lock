@@ -105,7 +105,7 @@ name = "avcc"
 version = "0.1.0"
 dependencies = [
  "failure",
- "h264-reader",
+ "h264-reader 0.4.0 (git+https://github.com/scottlamb/h264-reader?branch=more-public-fields)",
  "pretty-hex",
  "rusqlite",
  "structopt",
@@ -669,6 +669,15 @@ dependencies = [
 [[package]]
 name = "h264-reader"
 version = "0.4.0"
+source = "git+https://github.com/dholroyd/h264-reader#f0456345863f7c3fdba12720fe9ad81f2973a935"
+dependencies = [
+ "bitreader",
+ "memchr",
+]
+
+[[package]]
+name = "h264-reader"
+version = "0.4.0"
 source = "git+https://github.com/scottlamb/h264-reader?branch=more-public-fields#f3d8aa6c8b0d9d145c378c1af316522c8897f7aa"
 dependencies = [
  "bitreader",
@@ -1057,7 +1066,7 @@ dependencies = [
  "digest_auth",
  "failure",
  "futures",
- "h264-reader",
+ "h264-reader 0.4.0 (git+https://github.com/dholroyd/h264-reader)",
  "once_cell",
  "pretty-hex",
  "rtcp",
@@ -1116,7 +1125,7 @@ name = "nal-viewer"
 version = "0.1.0"
 dependencies = [
  "failure",
- "h264-reader",
+ "h264-reader 0.4.0 (git+https://github.com/scottlamb/h264-reader?branch=more-public-fields)",
  "pretty-hex",
  "structopt",
 ]
