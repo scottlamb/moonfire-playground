@@ -1,8 +1,8 @@
 //! Starts a RTSP stream and logs/discards all the packets.
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use failure::{Error, bail, format_err};
-use log::{debug, error, info, trace};
+use log::{debug, error, info, log_enabled, trace};
 use moonfire_rtsp::client::ChannelHandler;
 use moonfire_rtsp::client::video::h264;
 use std::{fmt::Write, str::FromStr};
@@ -76,8 +76,13 @@ impl moonfire_rtsp::client::video::VideoHandler for PrintVideoHandler {
         Ok(())
     }
 
-    fn picture(&self, picture: &moonfire_rtsp::client::video::Picture) -> Result<(), Error> {
+    fn picture(&self, mut picture: moonfire_rtsp::client::video::Picture) -> Result<(), Error> {
         info!("Picture: {:#?}", picture);
+        if log_enabled!(log::Level::Trace) {
+            use pretty_hex::PrettyHex;
+            let b = picture.copy_to_bytes(picture.remaining());
+            trace!("Picture data: {:#?}", b.hex_dump());
+        }
         Ok(())
     }
 }

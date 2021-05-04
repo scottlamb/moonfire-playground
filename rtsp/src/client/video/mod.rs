@@ -5,7 +5,7 @@ pub mod h264;
 pub trait VideoHandler {
     type Metadata : Metadata;
     fn metadata_change(&self, metadata: &Self::Metadata) -> Result<(), Error>;
-    fn picture(&self, picture: &Picture) -> Result<(), Error>;
+    fn picture(&self, picture: Picture) -> Result<(), Error>;
 }
 
 pub trait Metadata : Clone + std::fmt::Debug {
@@ -53,6 +53,11 @@ pub struct Picture {
     /// In H.264 terms, this is a frame with `nal_ref_idc == 0`.
     pub is_disposable: bool,
 
+    /// Position within `concat(data_prefix, data)`.
+    pos: u32,
+
+    data_prefix: [u8; 4],
+
     /// Frame content in the requested format. Currently in a single [bytes::Bytes]
     /// allocation, but this may change when supporting H.264 partitioned slices
     /// or if we revise the fragmentation implementation.
@@ -66,6 +71,8 @@ impl std::fmt::Debug for Picture {
          .field("rtp_timestamp", &self.rtp_timestamp)
          .field("is_random_access_point", &self.is_random_access_point)
          .field("is_disposable", &self.is_disposable)
+         .field("pos", &self.pos)
+         .field("data_len", &(self.data.len() + 4))
          //.field("data", &self.data.hex_dump()) 
          .finish()
     }
@@ -75,14 +82,39 @@ impl std::fmt::Debug for Picture {
 // and that is codec-specific, so maybe Picture should be a trait object also?
 impl bytes::Buf for Picture {
     fn remaining(&self) -> usize {
-        self.data.remaining()
+        self.data.len() + 4 - (self.pos as usize)
     }
 
     fn chunk(&self) -> &[u8] {
-        self.data.chunk()
+        let pos = self.pos as usize;
+        if let Some(pos_within_data) = pos.checked_sub(4) {
+            &self.data[pos_within_data..]
+        } else {
+            &self.data_prefix[pos..]
+        }
     }
 
     fn advance(&mut self, cnt: usize) {
-        self.data.advance(cnt)
+        assert!((self.pos as usize) + cnt <= 4 + self.data.len());
+        self.pos += cnt as u32;
+    }
+
+    fn chunks_vectored<'a>(&'a self, dst: &mut [std::io::IoSlice<'a>]) -> usize {
+        match dst.len() {
+            0 => 0,
+            1 => {
+                dst[0] = std::io::IoSlice::new(self.chunk());
+                1
+            },
+            _ if self.pos < 4 => {
+                dst[0] = std::io::IoSlice::new(&self.data_prefix[self.pos as usize..]);
+                dst[1] = std::io::IoSlice::new(&self.data);
+                2
+            },
+            _ => {
+                dst[0] = std::io::IoSlice::new(&self.data[(self.pos - 4) as usize..]);
+                1
+            }
+        }
     }
 }

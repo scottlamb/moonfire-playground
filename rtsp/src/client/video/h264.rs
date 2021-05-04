@@ -259,10 +259,12 @@ impl<'a> AccessUnitHandler for VideoAccessUnitHandler<'a> {
                 }
                 let rtp_timestamp = *timestamp;
                 self.state = VideoState::SentPicture;
-                self.inner.picture(&Picture {
+                self.inner.picture(Picture {
                     rtp_timestamp,
                     is_random_access_point: unit_type == UnitType::SliceLayerWithoutPartitioningIdr,
                     is_disposable: nal_header.nal_ref_idc() == 0,
+                    pos: 0,
+                    data_prefix: u32::try_from(nal.len()).unwrap().to_be_bytes(),
                     data: nal,
                 })?;
             },
