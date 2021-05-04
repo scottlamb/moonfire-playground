@@ -2,8 +2,9 @@
 
 use bytes::Bytes;
 use failure::{Error, bail, format_err};
+use log::{debug, error, trace};
 use moonfire_rtsp::client::{ChannelHandler, h264};
-use std::fmt::Write;
+use std::{fmt::Write, str::FromStr};
 use structopt::StructOpt;
 
 const KEEPALIVE_DURATION: std::time::Duration = std::time::Duration::from_secs(30);
@@ -38,10 +39,24 @@ pub fn prettify_failure(e: &failure::Error) -> String {
     msg
 }
 
+fn init_logging() -> mylog::Handle {
+    let h = mylog::Builder::new()
+        .set_format(::std::env::var("MOONFIRE_FORMAT")
+                    .map_err(|_| ())
+                    .and_then(|s| mylog::Format::from_str(&s))
+                    .unwrap_or(mylog::Format::Google))
+        .set_spec(&::std::env::var("MOONFIRE_LOG").unwrap_or("info".to_owned()))
+        .build();
+    h.clone().install().unwrap();
+    h
+}
+
 #[tokio::main]
 async fn main() {
+    let mut h = init_logging();
+    let _a = h.async_scope();
     if let Err(e) = main_inner().await {
-        eprintln!("{}", prettify_failure(&e));
+        error!("{}", prettify_failure(&e));
         std::process::exit(1);
     }
 }
@@ -64,7 +79,8 @@ async fn main_inner() -> Result<(), Error> {
         .build(Bytes::new())).await?;
 
     // DESCRIBE. https://tools.ietf.org/html/rfc2326#section-10.2
-    let describe = dbg!(cli.describe(opt.url).await?);
+    let describe = cli.describe(opt.url).await?;
+    debug!("DESCRIBE response: {:#?}", &describe);
     let video = describe.sdp.media_descriptions.first().expect("has a media description");
     assert_eq!(video.media_name.media, "video");  // TODO: not guaranteed this is first.
     let video_control_url_str = video.attribute("control").expect("has control attribute");
@@ -78,7 +94,7 @@ async fn main_inner() -> Result<(), Error> {
         }
     }
     let video_metadata = video_metadata.unwrap();
-    dbg!(&video_metadata);
+    debug!("video metadata: {:#?}", &video_metadata);
 
     let video_control_url = describe.base_url.join(video_control_url_str).unwrap();
 
@@ -89,7 +105,7 @@ async fn main_inner() -> Result<(), Error> {
         .header(rtsp_types::headers::TRANSPORT, "RTP/AVP/TCP;unicast;interleaved=0-1".to_owned())
         .header(moonfire_rtsp::X_DYNAMIC_RATE.clone(), "1".to_owned())
         .build(Bytes::new())).await?;
-    dbg!(&setup_resp);
+    debug!("SETUP response: {:#?}", &setup_resp);
     let session = setup_resp.header(&rtsp_types::headers::SESSION).expect("has session");
     let session_id = session.as_str().split(';').next().expect("has session id");
 
@@ -148,6 +164,7 @@ async fn main_inner() -> Result<(), Error> {
         tokio::select! {
             msg = cli.next() => {
                 let msg = msg.ok_or_else(|| format_err!("EOF"))??;
+                trace!("msg: {:#?}", &msg);
                 match msg.msg {
                     rtsp_types::Message::Data(data) => {
                         match data.channel_id() {

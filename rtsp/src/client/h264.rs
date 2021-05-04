@@ -7,7 +7,8 @@ use std::{cell::RefCell, convert::TryFrom};
 
 use bytes::{Bytes, BytesMut, Buf, BufMut};
 use failure::{Error, bail, format_err};
-use h264_reader::{annexb::NalReader, nal::{UnitType, sei::SeiIncrementalPayloadReader, slice::SliceLayerWithoutPartitioningRbsp}};
+use h264_reader::{annexb::NalReader, nal::{sei::SeiIncrementalPayloadReader, slice::SliceLayerWithoutPartitioningRbsp}};
+use log::{info, log_enabled, trace};
 
 /// A [super::rtp::PacketHandler] implementation which breaks H.264 data into access units and NALs.
 /// Currently expects that the stream starts at an access unit boundary and has no lost packets.
@@ -56,10 +57,13 @@ impl SeiIncrementalPayloadReader for HeaderPrinter {
     type Ctx = ();
 
     fn start(&mut self, _ctx: &mut h264_reader::Context<Self::Ctx>, payload_type: h264_reader::nal::sei::HeaderType, payload_size: u32) {
-        println!("  SEI payload type={:?} size={}", &payload_type, payload_size);
+        trace!("  SEI payload type={:?} size={}", &payload_type, payload_size);
     }
 
-    fn push(&mut self, _ctx: &mut h264_reader::Context<Self::Ctx>, _buf: &[u8]) {}
+    fn push(&mut self, _ctx: &mut h264_reader::Context<Self::Ctx>, buf: &[u8]) {
+        use pretty_hex::PrettyHex;
+        trace!("SEI: {:?}", buf.hex_dump());
+    }
     fn end(&mut self, _ctx: &mut h264_reader::Context<Self::Ctx>) {}
     fn reset(&mut self, _ctx: &mut h264_reader::Context<Self::Ctx>) {}
 }
@@ -70,9 +74,9 @@ impl PrintAccessUnitHandler {
             .map_err(|e| format_err!("{:?}", e))?;
         let ctx = config.create_context(())
             .map_err(|e| format_err!("{:?}", e))?;
-        //let sei_handler = h264_reader::nal::sei::SeiNalHandler::new(HeaderPrinter);
+        let sei_handler = h264_reader::nal::sei::SeiNalHandler::new(HeaderPrinter);
         let mut nal_switch = h264_reader::nal::NalSwitch::default();
-        //nal_switch.put_handler(h264_reader::nal::UnitType::SEI, Box::new(RefCell::new(sei_handler)));
+        nal_switch.put_handler(h264_reader::nal::UnitType::SEI, Box::new(RefCell::new(sei_handler)));
         nal_switch.put_handler(h264_reader::nal::UnitType::SliceLayerWithoutPartitioningIdr, Box::new(RefCell::new(SliceLayerWithoutPartitioningRbsp::default())));
         nal_switch.put_handler(h264_reader::nal::UnitType::SliceLayerWithoutPartitioningNonIdr, Box::new(RefCell::new(SliceLayerWithoutPartitioningRbsp::default())));
         Ok(PrintAccessUnitHandler {
@@ -84,20 +88,18 @@ impl PrintAccessUnitHandler {
 
 impl AccessUnitHandler for PrintAccessUnitHandler {
     fn start(&mut self, _rtsp_ctx: &crate::Context, timestamp: crate::Timestamp, _hdr: &rtp::header::Header) -> Result<(), Error> {
-        println!("access unit with timestamp {}:", timestamp);
+        info!("access unit with timestamp {}:", timestamp);
         Ok(())
     }
 
     fn nal(&mut self, nalu: Bytes) -> Result<(), Error> {
         let nal_header = h264_reader::nal::NalHeader::new(nalu[0]).map_err(|e| format_err!("bad NAL header 0x{:x}: {:#?}", nalu[0], e))?;
-        if nal_header.nal_unit_type() == UnitType::SEI {
-            use pretty_hex::PrettyHex;
-            println!("SEI: {:?}", nalu.hex_dump());
+        info!("  nal ref_idc={} type={} ({:?}) size={}", nal_header.nal_ref_idc(), nal_header.nal_unit_type().id(), nal_header.nal_unit_type(), nalu.len());
+        if log_enabled!(log::Level::Trace) {
+            self.nal_switch.start(&mut self.ctx);
+            self.nal_switch.push(&mut self.ctx, &nalu[..]);
+            self.nal_switch.end(&mut self.ctx);
         }
-        println!("  nal ref_idc {} type {} ({:?})", nal_header.nal_ref_idc(), nal_header.nal_unit_type().id(), nal_header.nal_unit_type());
-        self.nal_switch.start(&mut self.ctx);
-        self.nal_switch.push(&mut self.ctx, &nalu[..]);
-        self.nal_switch.end(&mut self.ctx);
         Ok(())
     }
 

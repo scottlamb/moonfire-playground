@@ -12,7 +12,8 @@ pub static X_DYNAMIC_RATE: Lazy<rtsp_types::HeaderName> = Lazy::new(
     || rtsp_types::HeaderName::from_static_str("x-Dynamic-Rate").expect("is ascii")
 );
 
-pub struct Message {
+#[derive(Debug)]
+pub struct ReceivedMessage {
     pub ctx: Context,
     pub msg: rtsp_types::Message<Bytes>,
 }
@@ -150,7 +151,7 @@ fn map_body<Body, NewBody: AsRef<[u8]>, F: FnOnce(Body) -> NewBody>(m: rtsp_type
 }
 
 impl tokio_util::codec::Decoder for Codec {
-    type Item = Message;
+    type Item = ReceivedMessage;
     type Error = failure::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
@@ -160,7 +161,7 @@ impl tokio_util::codec::Decoder for Codec {
             Err(rtsp_types::ParseError::Error) => bail!("RTSP parse error: {:#?}", &self.ctx),
             Err(rtsp_types::ParseError::Incomplete) => return Ok(None),
         };
-        let msg = Message {
+        let msg = ReceivedMessage {
             ctx: self.ctx,
             msg: map_body(msg, Bytes::copy_from_slice),
         };

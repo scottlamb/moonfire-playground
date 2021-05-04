@@ -1067,6 +1067,8 @@ dependencies = [
  "failure",
  "futures",
  "h264-reader 0.4.0 (git+https://github.com/dholroyd/h264-reader)",
+ "log",
+ "mylog",
  "once_cell",
  "pretty-hex",
  "rtcp",

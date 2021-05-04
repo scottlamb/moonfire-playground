@@ -2,7 +2,8 @@
 
 use bytes::Bytes;
 use failure::{Error, bail};
-//use pretty_hex::PrettyHex;
+use log::{debug, trace};
+use pretty_hex::PrettyHex;
 use rtp::packetizer::Marshaller;
 
 #[derive(Debug)]
@@ -84,8 +85,8 @@ impl<'a> super::ChannelHandler for StrictSequenceChecker<'a> {
             bail!("Expected ssrc={:08x} seq={:04x} got ssrc={:08x} seq={:04x} ts={} at {:#?}",
                   self.ssrc, self.next_seq, pkt.header.ssrc, pkt.header.sequence_number, timestamp, &rtsp_ctx);
         }
-        //println!("pkt{} seq={:04x} ts={}", if pkt.header.marker { "   " } else { "(M)"}, self.next_seq, &timestamp);
-        //println!("{:?}", data.hex_dump());
+        debug!("pkt{} seq={:04x} ts={}", if pkt.header.marker { "   " } else { "(M)"}, self.next_seq, &timestamp);
+        trace!("{:?}", data.hex_dump());
         self.next_seq = pkt.header.sequence_number.wrapping_add(1);
         self.max_seq_skip = 0;
         self.inner.pkt(Packet {

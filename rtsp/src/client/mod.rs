@@ -171,7 +171,7 @@ impl Session {
         })
     }
 
-    pub async fn next(&mut self) -> Option<Result<crate::Message, Error>> {
+    pub async fn next(&mut self) -> Option<Result<crate::ReceivedMessage, Error>> {
         self.stream.next().await
     }
 }
