@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use bytes::Bytes;
 use failure::{Error, bail};
 use log::{debug, info, trace};
@@ -15,8 +16,9 @@ impl TimestampPrinter {
     }
 }
 
+#[async_trait]
 impl super::ChannelHandler for TimestampPrinter {
-    fn data(&mut self, rtsp_ctx: crate::Context, timeline: &mut crate::Timeline, mut data: Bytes) -> Result<(), Error> {
+    async fn data(&mut self, rtsp_ctx: crate::Context, timeline: &mut crate::Timeline, mut data: Bytes) -> Result<(), Error> {
         while !data.is_empty() {
             let h = match rtcp::header::Header::unmarshal(&data) {
                 Err(e) => bail!("corrupt RTCP header at {:#?}: {}", &rtsp_ctx, e),
@@ -49,7 +51,7 @@ impl super::ChannelHandler for TimestampPrinter {
         Ok(())
     }
 
-    fn end(&mut self) -> Result<(), Error> {
+    async fn end(&mut self) -> Result<(), Error> {
         Ok(())
     }
 }

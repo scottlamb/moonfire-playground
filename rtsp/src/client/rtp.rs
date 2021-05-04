@@ -1,5 +1,6 @@
 //! RTP handling.
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use failure::{Error, bail};
 use log::{debug, trace};
@@ -13,13 +14,14 @@ pub struct Packet {
     pub pkt: rtp::packet::Packet,
 }
 
+#[async_trait]
 pub trait PacketHandler {
     /// Handles a packet.
     /// `timestamp` is non-decreasing between calls.
-    fn pkt(&mut self, pkt: Packet) -> Result<(), Error>;
+    async fn pkt(&mut self, pkt: Packet) -> Result<(), Error>;
 
     /// Handles the end of the stream.
-    fn end(&mut self) -> Result<(), Error>;
+    async fn end(&mut self) -> Result<(), Error>;
 }
 
 /// Maximum number of skipped initial sequence numbers.
@@ -52,15 +54,15 @@ const MAX_INITIAL_SEQ_SKIP: u16 = 128;
 /// [RFC 3550 section 8.2](https://tools.ietf.org/html/rfc3550#section-8.2) says that SSRC
 /// can change mid-session with a RTCP BYE message. This currently isn't handled. I'm
 /// not sure it will ever come up with IP cameras.
-pub struct StrictSequenceChecker<'a> {
+pub struct StrictSequenceChecker<P: PacketHandler> {
     ssrc: u32,
     next_seq: u16,
-    inner: &'a mut dyn PacketHandler,
+    inner: P,
     max_seq_skip: u16,
 }
 
-impl<'a> StrictSequenceChecker<'a> {
-    pub fn new(ssrc: u32, next_seq: u16, inner: &'a mut dyn PacketHandler) -> Self {
+impl<P: PacketHandler> StrictSequenceChecker<P> {
+    pub fn new(ssrc: u32, next_seq: u16, inner: P) -> Self {
         Self {
             ssrc,
             next_seq,
@@ -68,10 +70,15 @@ impl<'a> StrictSequenceChecker<'a> {
             max_seq_skip: MAX_INITIAL_SEQ_SKIP,
         }
     }
+
+    pub fn into_inner(self) -> P {
+        self.inner
+    }
 }
 
-impl<'a> super::ChannelHandler for StrictSequenceChecker<'a> {
-    fn data(&mut self, rtsp_ctx: crate::Context, timeline: &mut crate::Timeline, data: Bytes) -> Result<(), Error> {
+#[async_trait]
+impl<P: PacketHandler + Send> super::ChannelHandler for StrictSequenceChecker<P> {
+    async fn data(&mut self, rtsp_ctx: crate::Context, timeline: &mut crate::Timeline, data: Bytes) -> Result<(), Error> {
         let pkt = match rtp::packet::Packet::unmarshal(&data) {
             Err(e) => bail!("corrupt RTP packet while expecting seq={:04x} at {:#?}: {}", self.next_seq, &rtsp_ctx, e),
             Ok(p) => p,
@@ -93,10 +100,10 @@ impl<'a> super::ChannelHandler for StrictSequenceChecker<'a> {
             rtsp_ctx,
             timestamp,
             pkt
-        })
+        }).await
     }
 
-    fn end(&mut self) -> Result<(), Error> {
-        self.inner.end()
+    async fn end(&mut self) -> Result<(), Error> {
+        self.inner.end().await
     }
 }

@@ -5,6 +5,7 @@ use rtsp_types::Message;
 use std::{convert::TryFrom, fmt::{Debug, Display}};
 
 pub mod client;
+pub mod mp4;
 
 pub static X_ACCEPT_DYNAMIC_RATE: Lazy<rtsp_types::HeaderName> = Lazy::new(
     || rtsp_types::HeaderName::from_static_str("x-Accept-Dynamic-Rate").expect("is ascii")

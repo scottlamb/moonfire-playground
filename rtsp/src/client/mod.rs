@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use failure::{Error, bail, format_err};
 use futures::{SinkExt, StreamExt};
@@ -24,9 +25,10 @@ pub struct Session {
 }
 
 /// Handles data from a RTSP data channel.
+#[async_trait]
 pub trait ChannelHandler {
-    fn data(&mut self, ctx: crate::Context, timeline: &mut crate::Timeline, data: Bytes) -> Result<(), Error>;
-    fn end(&mut self) -> Result<(), Error>;
+    async fn data(&mut self, ctx: crate::Context, timeline: &mut crate::Timeline, data: Bytes) -> Result<(), Error>;
+    async fn end(&mut self) -> Result<(), Error>;
 }
 
 #[derive(Debug)]

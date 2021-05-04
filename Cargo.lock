@@ -1061,6 +1061,7 @@ dependencies = [
 name = "moonfire-rtsp"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64",
  "bytes",
  "digest_auth",

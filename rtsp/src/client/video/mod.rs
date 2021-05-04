@@ -1,11 +1,13 @@
+use async_trait::async_trait;
 use failure::Error;
 
 pub mod h264;
 
+#[async_trait]
 pub trait VideoHandler {
     type Metadata : Metadata;
-    fn metadata_change(&self, metadata: &Self::Metadata) -> Result<(), Error>;
-    fn picture(&self, picture: Picture) -> Result<(), Error>;
+    async fn metadata_change(&mut self, metadata: &Self::Metadata) -> Result<(), Error>;
+    async fn picture(&mut self, picture: Picture) -> Result<(), Error>;
 }
 
 pub trait Metadata : Clone + std::fmt::Debug {
