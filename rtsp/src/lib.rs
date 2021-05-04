@@ -1,6 +1,7 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use failure::{Error, bail};
 use once_cell::sync::Lazy;
+use rtsp_types::Message;
 use std::{convert::TryFrom, fmt::{Debug, Display}};
 
 pub mod client;
@@ -15,7 +16,7 @@ pub static X_DYNAMIC_RATE: Lazy<rtsp_types::HeaderName> = Lazy::new(
 #[derive(Debug)]
 pub struct ReceivedMessage {
     pub ctx: Context,
-    pub msg: rtsp_types::Message<Bytes>,
+    pub msg: Message<Bytes>,
 }
 
 const MAX_TS_JUMP_SECS: u32 = 10;
@@ -141,13 +142,21 @@ struct Codec {
     ctx: Context,
 }
 
-fn map_body<Body, NewBody: AsRef<[u8]>, F: FnOnce(Body) -> NewBody>(m: rtsp_types::Message<Body>, f: F) -> rtsp_types::Message<NewBody> {
-    use rtsp_types::Message;
-    match m {
-        Message::Request(r) => Message::Request(r.map_body(f)),
-        Message::Response(r) => Message::Response(r.map_body(f)),
-        Message::Data(d) => Message::Data(d.map_body(f)),
+/// Returns the range within `buf` that represents `subset`.
+/// If `subset` is empty, returns None; otherwise panics if `subset` is not within `buf`.
+fn as_range(buf: &BytesMut, subset: &[u8]) -> Option<std::ops::Range<usize>> {
+    if subset.is_empty() {
+        return None;
     }
+    let subset_p = subset.as_ptr() as usize;
+    let buf_p = buf.as_ptr() as usize;
+    let off = match subset_p.checked_sub(buf_p) {
+        Some(off) => off,
+        None => panic!("{}-byte subset not within {}-byte buf", subset.len(), buf.len()),
+    };
+    let end = off + subset.len();
+    assert!(end <= buf.len());
+    Some(off..end)
 }
 
 impl tokio_util::codec::Decoder for Codec {
@@ -155,17 +164,65 @@ impl tokio_util::codec::Decoder for Codec {
     type Error = failure::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        // TODO: zero-copy.
-        let (msg, len): (rtsp_types::Message<&[u8]>, _) = match rtsp_types::Message::parse(src) {
+        let (msg, len): (Message<&[u8]>, _) = match rtsp_types::Message::parse(src) {
             Ok((m, l)) => (m, l),
             Err(rtsp_types::ParseError::Error) => bail!("RTSP parse error: {:#?}", &self.ctx),
             Err(rtsp_types::ParseError::Incomplete) => return Ok(None),
         };
+
+        // Map msg's body to a Bytes representation and advance `src`. Awkward:
+        // 1.  lifetime concerns require mapping twice: first so the message
+        //     doesn't depend on the BytesMut, which needs to be split/advanced;
+        //     then to get the proper Bytes body in place post-split.
+        // 2.  rtsp_types messages must be AsRef<[u8]>, so we can't use the
+        //     range as an intermediate body.
+        // 3.  within a match because the rtsp_types::Message enum itself
+        //     doesn't have body/replace_body/map_body methods.
+        let msg = match msg {
+            Message::Request(msg) => {
+                let body_range = as_range(src, msg.body());
+                let msg = msg.replace_body(rtsp_types::Empty);
+                if let Some(r) = body_range {
+                    let mut raw_msg = src.split_to(len);
+                    raw_msg.advance(r.start);
+                    raw_msg.truncate(r.len());
+                    Message::Request(msg.replace_body(raw_msg.freeze()))
+                } else {
+                    src.advance(len);
+                    Message::Request(msg.replace_body(Bytes::new()))
+                }
+            },
+            Message::Response(msg) => {
+                let body_range = as_range(src, msg.body());
+                let msg = msg.replace_body(rtsp_types::Empty);
+                if let Some(r) = body_range {
+                    let mut raw_msg = src.split_to(len);
+                    raw_msg.advance(r.start);
+                    raw_msg.truncate(r.len());
+                    Message::Response(msg.replace_body(raw_msg.freeze()))
+                } else {
+                    src.advance(len);
+                    Message::Response(msg.replace_body(Bytes::new()))
+                }
+            },
+            Message::Data(msg) => {
+                let body_range = as_range(src, msg.as_slice());
+                let msg = msg.replace_body(rtsp_types::Empty);
+                if let Some(r) = body_range {
+                    let mut raw_msg = src.split_to(len);
+                    raw_msg.advance(r.start);
+                    raw_msg.truncate(r.len());
+                    Message::Data(msg.replace_body(raw_msg.freeze()))
+                } else {
+                    src.advance(len);
+                    Message::Data(msg.replace_body(Bytes::new()))
+                }
+            },
+        };
         let msg = ReceivedMessage {
             ctx: self.ctx,
-            msg: map_body(msg, Bytes::copy_from_slice),
+            msg,
         };
-        src.advance(len);
         self.ctx.rtsp_message_offset += u64::try_from(len).expect("usize fits in u64");
         Ok(Some(msg))
     }

@@ -400,7 +400,7 @@ impl Metadata {
         let mut sps_nal = None;
         let mut pps_nal = None;
         for nal in sprop_parameter_sets.split(',') {
-            let nal = base64::decode(nal)?;
+            let nal = base64::decode(nal).map_err(|_| format_err!("NAL has invalid base64 encoding"))?;
             if nal.is_empty() {
                 bail!("empty NAL");
             }
