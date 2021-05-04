@@ -2,8 +2,9 @@
 
 use bytes::Bytes;
 use failure::{Error, bail, format_err};
-use log::{debug, error, trace};
-use moonfire_rtsp::client::{ChannelHandler, h264};
+use log::{debug, error, info, trace};
+use moonfire_rtsp::client::ChannelHandler;
+use moonfire_rtsp::client::video::h264;
 use std::{fmt::Write, str::FromStr};
 use structopt::StructOpt;
 
@@ -65,6 +66,22 @@ fn split_key_value(keyvalue: &str) -> Option<(&str, &str)> {
     keyvalue.find('=').map(|p| (&keyvalue[0..p], &keyvalue[p+1..]))
 }
 
+struct PrintVideoHandler;
+
+impl moonfire_rtsp::client::video::VideoHandler for PrintVideoHandler {
+    type Metadata = h264::Metadata;
+
+    fn metadata_change(&self, metadata: &Self::Metadata) -> Result<(), Error> {
+        info!("Video metadata changed: {:#?}", metadata);
+        Ok(())
+    }
+
+    fn picture(&self, picture: &moonfire_rtsp::client::video::Picture) -> Result<(), Error> {
+        info!("Picture: {:#?}", picture);
+        Ok(())
+    }
+}
+
 async fn main_inner() -> Result<(), Error> {
     let opt = Opt::from_args();
     let mut cli = moonfire_rtsp::client::Session::connect(&opt.url, Some(moonfire_rtsp::client::Credentials {
@@ -94,7 +111,7 @@ async fn main_inner() -> Result<(), Error> {
         }
     }
     let video_metadata = video_metadata.unwrap();
-    debug!("video metadata: {:#?}", &video_metadata);
+    info!("video metadata: {:#?}", &video_metadata);
 
     let video_control_url = describe.base_url.join(video_control_url_str).unwrap();
 
@@ -153,9 +170,11 @@ async fn main_inner() -> Result<(), Error> {
     dbg!(&play_resp);
 
     // Read RTP data.
-    let mut print_au = moonfire_rtsp::client::h264::PrintAccessUnitHandler::new(&video_metadata)?;
+    let mut print_vid = PrintVideoHandler;
+    let mut to_vid = moonfire_rtsp::client::video::h264::VideoAccessUnitHandler::new(video_metadata, &mut print_vid);
+    //let mut print_au = moonfire_rtsp::client::video::h264::PrintAccessUnitHandler::new(&video_metadata)?;
     let mut h264_timeline = moonfire_rtsp::Timeline::new(video_rtptime, 90_000);
-    let mut h264 = moonfire_rtsp::client::h264::Handler::new(&mut print_au);
+    let mut h264 = moonfire_rtsp::client::video::h264::Handler::new(&mut to_vid /*print_au*/);
     let mut h264_rtp = moonfire_rtsp::client::rtp::StrictSequenceChecker::new(video_ssrc, video_seq, &mut h264);
     let mut h264_rtcp = moonfire_rtsp::client::rtcp::TimestampPrinter::new();
     let mut timeout = tokio::time::Instant::now() + KEEPALIVE_DURATION;

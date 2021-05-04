@@ -8,7 +8,7 @@ use url::Url;
 
 pub mod rtcp;
 pub mod rtp;
-pub mod h264;
+pub mod video;
 
 pub struct Credentials {
     pub username: String,
