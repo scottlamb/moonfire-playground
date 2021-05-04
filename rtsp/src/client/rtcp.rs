@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use failure::{Error, bail};
-use log::{debug, info};
+use log::{debug, info, trace};
 use rtcp::packet::Packet;
 
 pub struct TimestampPrinter {
@@ -33,7 +33,6 @@ impl super::ChannelHandler for TimestampPrinter {
                     Ok(p) => p,
                 };
 
-                // TODO: this should share a 64-bit RTP timestamp with rtp::StrictSequenceNumber.
                 let timestamp = match timeline.advance(pkt.rtp_time) {
                     Ok(ts) => ts,
                     Err(e) => return Err(e.context(format!("bad RTP timestamp in RTCP SR {:#?} at {:#?}", &pkt, &rtsp_ctx)).into()),
@@ -42,7 +41,7 @@ impl super::ChannelHandler for TimestampPrinter {
                 self.prev_sr = Some(pkt);
             } else if h.packet_type == rtcp::header::PacketType::SourceDescription {
                 let _pkt = rtcp::source_description::SourceDescription::unmarshal(&pkt)?;
-                //println!("rtcp source description: {:#?}", &pkt);
+                trace!("rtcp source description: {:#?}", &pkt);
             } else {
                 debug!("rtcp: {:?}", h.packet_type);
             }
