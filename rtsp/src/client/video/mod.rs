@@ -80,8 +80,6 @@ impl std::fmt::Debug for Picture {
     }
 }
 
-// FIXME: this should have the prefix for H.264 NALs. I don't want to add it to the Bytes,
-// and that is codec-specific, so maybe Picture should be a trait object also?
 impl bytes::Buf for Picture {
     fn remaining(&self) -> usize {
         self.data.len() + 4 - (self.pos as usize)
