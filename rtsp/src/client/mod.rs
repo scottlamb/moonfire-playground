@@ -67,6 +67,11 @@ impl Session {
         if url.scheme() != "rtsp" {
             bail!("Only rtsp urls supported (no rtsps yet)");
         }
+        if url.username() != "" || url.password().is_some() {
+            // Url apparently doesn't even have a way to clear the credentials,
+            // so this has to be an error.
+            bail!("URL must not contain credentials");
+        }
         let host = url.host_str().ok_or_else(|| format_err!("Must specify host in rtsp url {}", &url))?;
         let port = url.port().unwrap_or(554);
         let stream = tokio::net::TcpStream::connect((host, port)).await?;
