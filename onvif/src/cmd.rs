@@ -31,7 +31,7 @@ const GET_METADATA_CONFIGURATIONS: &'static str = r#"
     <media:GetMetadataConfigurations />
 "#;
 
-const SET_METADATA_CONFIGURATION_DAHUA: &'static str = r#"
+const _SET_METADATA_CONFIGURATION_DAHUA: &'static str = r#"
     <media:SetMetadataConfiguration>
       <media:Configuration token="000">
         <onvif:PTZStatus>
@@ -172,7 +172,7 @@ pub fn get_capabilities(
     t: &UsernameToken,
 ) -> Result<resp::GetCapabilitiesResponse, Error> {
     let body = get_capabilities_request(t)?;
-    let mut resp = cli
+    let resp = cli
         .post(device_url)
         .header("Content-Type", "application/soap+xml")
         .header(
@@ -201,7 +201,7 @@ pub fn create_pull_point_subscription(
     t: &UsernameToken,
 ) -> Result<resp::CreatePullPointSubscriptionResponse, Error> {
     let body = create_pull_point_subscription_request(t)?;
-    let mut resp = cli.post(events_url)
+    let resp = cli.post(events_url)
         .header("Content-Type", "application/soap+xml")
         .header("Soapaction", "\"http://www.onvif.org/ver10/events/wsdl/EventPortType/CreatePullPointSubscriptionRequest\"")
         .body(body)
@@ -222,7 +222,7 @@ fn pull_messages_request(t: &UsernameToken) -> Result<String, Error> {
 
 pub fn pull_messages(cli: &reqwest::blocking::Client, ref_url: Url, t: &UsernameToken) -> Result<resp::PullMessagesResponse, Error> {
     let body = pull_messages_request(t)?;
-    let mut resp = cli
+    let resp = cli
         .post(ref_url)
         .header("Content-Type", "application/soap+xml")
         .header(
@@ -246,7 +246,7 @@ fn unsubscribe_request(t: &UsernameToken) -> Result<String, Error> {
 
 pub fn unsubscribe(cli: &reqwest::blocking::Client, ref_url: Url, t: &UsernameToken) -> Result<resp::UnsubscribeResponse, Error> {
     let body = unsubscribe_request(t)?;
-    let mut resp = cli
+    let resp = cli
         .post(ref_url)
         .header("Content-Type", "application/soap+xml")
         .header(
@@ -270,7 +270,7 @@ fn get_metadata_configurations_request(t: &UsernameToken) -> Result<String, Erro
 
 pub fn get_metadata_configurations(cli: &reqwest::blocking::Client, media_url: Url, t: &UsernameToken) -> Result<String, Error> {
     let body = get_metadata_configurations_request(t)?;
-    let mut resp = cli
+    let resp = cli
         .post(media_url)
         .header("Content-Type", "application/soap+xml")
         .header(
@@ -294,7 +294,7 @@ fn set_metadata_configuration_request(t: &UsernameToken) -> Result<String, Error
 // TODO: response proto.
 pub fn set_metadata_configuration(cli: &reqwest::blocking::Client, media_url: Url, t: &UsernameToken) -> Result<String, Error> {
     let body = set_metadata_configuration_request(t)?;
-    let mut resp = cli
+    let resp = cli
         .post(media_url)
         .header("Content-Type", "application/soap+xml")
         .header(
@@ -319,7 +319,7 @@ fn add_metadata_configuration_request(t: &UsernameToken) -> Result<String, Error
 // TODO: response proto.
 pub fn add_metadata_configuration(cli: &reqwest::blocking::Client, media_url: Url, t: &UsernameToken) -> Result<String, Error> {
     let body = add_metadata_configuration_request(t)?;
-    let mut resp = cli
+    let resp = cli
         .post(media_url)
         .header("Content-Type", "application/soap+xml")
         .header(

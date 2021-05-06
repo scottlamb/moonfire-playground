@@ -1,4 +1,4 @@
-mod cmd;
+pub mod cmd;
 mod resp;
 mod xml;
 
@@ -19,7 +19,7 @@ struct Opt {
     password: String,
 }
 
-struct Subscription {
+pub struct Subscription {
     client: reqwest::blocking::Client,
     ref_url: Option<Url>,
     username: String,
@@ -39,7 +39,7 @@ fn ensure_url_within_base(url: &mut Url, base: &Url) -> Result<(), Error> {
 }
 
 impl Subscription {
-    fn new(base_url: Url, username: String, password: String) -> Result<Self, Error> {
+    pub fn new(base_url: Url, username: String, password: String) -> Result<Self, Error> {
         let client = reqwest::blocking::Client::builder()
             .build()?;
         let device_url = base_url.join("onvif/device_service")?;
@@ -64,7 +64,7 @@ impl Subscription {
         })
     }
 
-    fn pull(&mut self) -> Result<resp::PullMessagesResponse, Error> {
+    pub fn pull(&mut self) -> Result<resp::PullMessagesResponse, Error> {
         let r = self.ref_url.as_ref().ok_or_else(|| format_err!("Subscription is closed"))?;
         let before = std::time::Instant::now();
         let pull_resp = cmd::pull_messages(
@@ -79,7 +79,7 @@ impl Subscription {
         Ok(pull_resp)
     }
 
-    fn close(&mut self) -> Result<(), Error> {
+    fn close_int(&mut self) -> Result<(), Error> {
         if let Some(r) = self.ref_url.as_ref() {
             cmd::unsubscribe(
                 &self.client,
@@ -90,11 +90,15 @@ impl Subscription {
         }
         Ok(())
     }
+
+    pub fn close(mut self) -> Result<(), Error> {
+        self.close_int()
+    }
 }
 
 impl Drop for Subscription {
     fn drop(&mut self) {
-        let _ = self.close();
+        let _ = self.close_int();
     }
 }
 

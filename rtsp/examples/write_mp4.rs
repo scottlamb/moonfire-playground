@@ -1,10 +1,9 @@
 //! Starts a RTSP stream and logs/discards all the packets.
 
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use failure::{Error, bail, format_err};
-use log::{debug, error, info, log_enabled, trace};
+use log::{debug, error, info, trace};
 use moonfire_rtsp::client::{ChannelHandler, join_control};
-use moonfire_rtsp::client::video::h264;
 use std::{fmt::Write, path::PathBuf, str::FromStr};
 use structopt::StructOpt;
 

@@ -24,7 +24,7 @@ pub struct Session {
     stream: Framed<tokio::net::TcpStream, crate::Codec>,
     user_agent: String,
     cseq: u32,
-    session_id: Option<String>,
+    //session_id: Option<String>,
 }
 
 /// Handles data from a RTSP data channel.
@@ -95,7 +95,7 @@ impl Session {
             stream,
             user_agent: "moonfire-rtsp test".to_string(),
             cseq: 1,
-            session_id: None,
+            //session_id: None,
         })
     }
 

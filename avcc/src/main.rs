@@ -25,7 +25,7 @@ struct Opt {
 /// Determine the max bitrate (a far upper bound) from the profile and level from Table A-1.
 /// Multiply by 1000 bits/sec for VCL bitstreams or 1200 bits/sec for NAL bitstreams.
 fn level_maxbr(sps: &h264_reader::nal::sps::SeqParameterSet) -> u32 {
-    let profile_idc = u8::from(sps.profile_idc);
+    //let profile_idc = u8::from(sps.profile_idc);
     // Is this applicable to the high profile (profile_idc = 100)? Not entirely sure.
     //assert!([66, 77, 88].contains(&profile_idc), "profile_idc={}", profile_idc);
     // Table A-1 on PDF page 329 (page 309, according to the footer).

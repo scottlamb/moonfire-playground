@@ -89,7 +89,7 @@ impl Stream {
     /// Parses from a [MediaDescription].
     /// On failure, returns an error which is expected to be supplemented with
     /// the [MediaDescription] debug string.
-    fn parse(base_url: &Url, media_description: &MediaDescription) -> Result<Stream, Error> {
+    fn parse(media_description: &MediaDescription) -> Result<Stream, Error> {
         // https://tools.ietf.org/html/rfc8866#section-5.14 says "If the <proto>
         // sub-field is "RTP/AVP" or "RTP/SAVP" the <fmt> sub-fields contain RTP
         // payload type numbers."
@@ -228,7 +228,7 @@ pub(crate) fn parse_describe(request_url: Url, response: rtsp_types::Response<By
     let streams = sdp.media_descriptions
         .iter()
         .enumerate()
-        .map(|(i, m)| Stream::parse(&base_url, &m)
+        .map(|(i, m)| Stream::parse(&m)
             .with_context(|_| format!("Unable to parse stream {}: {:#?}", i, &m))
             .map_err(Error::from))
         .collect::<Result<Vec<Stream>, Error>>()?;
