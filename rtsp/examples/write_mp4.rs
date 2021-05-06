@@ -64,10 +64,6 @@ async fn main() {
     }
 }
 
-fn split_key_value(keyvalue: &str) -> Option<(&str, &str)> {
-    keyvalue.find('=').map(|p| (&keyvalue[0..p], &keyvalue[p+1..]))
-}
-
 async fn main_inner() -> Result<(), Error> {
     let opt = Opt::from_args();
     let stop = tokio::signal::ctrl_c();
