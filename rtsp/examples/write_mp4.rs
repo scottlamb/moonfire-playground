@@ -78,15 +78,16 @@ async fn main_inner() -> Result<(), Error> {
     })).await?;
 
     // DESCRIBE. https://tools.ietf.org/html/rfc2326#section-10.2
-    let describe = cli.describe(opt.url).await?;
+    let mut describe = cli.describe(opt.url).await?;
     debug!("DESCRIBE response: {:#?}", &describe);
-    let video_stream = describe.streams.iter()
+    let video_stream = describe.streams.iter_mut()
         .find(|s| s.media == "video")
         .ok_or_else(|| format_err!("couldn't find video stream"))?;
-    let video_metadata = video_stream.metadata.as_ref().unwrap();
+    let video_metadata = video_stream.metadata.as_ref().unwrap().clone();
     info!("video metadata: {:#?}", &video_metadata);
 
     // SETUP. https://tools.ietf.org/html/rfc2326#section-10.4
+    let mut session_id = None;
     let setup_resp = cli.send(
         &mut rtsp_types::Request::builder(rtsp_types::Method::Setup, rtsp_types::Version::V1_0)
         .request_uri(describe.base_url.join(&video_stream.control)?)
@@ -94,26 +95,13 @@ async fn main_inner() -> Result<(), Error> {
         .header(moonfire_rtsp::X_DYNAMIC_RATE.clone(), "1".to_owned())
         .build(Bytes::new())).await?;
     debug!("SETUP response: {:#?}", &setup_resp);
-    let session = setup_resp.header(&rtsp_types::headers::SESSION).expect("has session");
-    let session_id = session.as_str().split(';').next().expect("has session id");
-
-    // The ssrc is supposed to be specified in the Transport header.
-    // TODO: Reolink cameras actually specify it in the PLAY response's RTP-Info header instead.
-    let transport = setup_resp.header(&rtsp_types::headers::TRANSPORT).expect("has Transport");
-    let mut video_ssrc = None;
-    for part in transport.as_str().split(';') {
-        if part.starts_with("ssrc=") {
-            video_ssrc = Some(u32::from_str_radix(&part["ssrc=".len()..], 16).unwrap());
-            break;
-        }
-    }
-    let video_ssrc = video_ssrc.unwrap();
+    moonfire_rtsp::client::parse_setup(setup_resp, &mut session_id, video_stream)?;
 
     // PLAY. https://tools.ietf.org/html/rfc2326#section-10.5
     let play_resp = cli.send(
         &mut rtsp_types::Request::builder(rtsp_types::Method::Play, rtsp_types::Version::V1_0)
         .request_uri(describe.base_url.clone())
-        .header(rtsp_types::headers::SESSION, session_id.to_owned())
+        .header(rtsp_types::headers::SESSION, session_id.as_deref().unwrap())
         .header(rtsp_types::headers::RANGE, "npt=0.000-".to_owned())
         .build(Bytes::new())).await?;
     let rtp_info = play_resp.header(&rtsp_types::headers::RTP_INFO).expect("has RTP-Info");
@@ -147,7 +135,7 @@ async fn main_inner() -> Result<(), Error> {
     //let mut print_au = moonfire_rtsp::client::video::h264::PrintAccessUnitHandler::new(&video_metadata)?;
     let mut h264_timeline = moonfire_rtsp::Timeline::new(video_rtptime, video_stream.clock_rate);
     let h264 = moonfire_rtsp::client::video::h264::Handler::new(to_vid);
-    let mut h264_rtp = moonfire_rtsp::client::rtp::StrictSequenceChecker::new(video_ssrc, video_seq, h264);
+    let mut h264_rtp = moonfire_rtsp::client::rtp::StrictSequenceChecker::new(video_stream.ssrc.unwrap(), video_seq, h264);
     let mut h264_rtcp = moonfire_rtsp::client::rtcp::TimestampPrinter::new();
 
     let timeout = tokio::time::sleep(KEEPALIVE_DURATION);
@@ -173,7 +161,7 @@ async fn main_inner() -> Result<(), Error> {
                 cli.send_nowait(
                     &mut rtsp_types::Request::builder(rtsp_types::Method::GetParameter, rtsp_types::Version::V1_0)
                     .request_uri(describe.base_url.clone())
-                    .header(rtsp_types::headers::SESSION, session_id.to_owned())
+                    .header(rtsp_types::headers::SESSION, session_id.as_deref().unwrap())
                     .build(Bytes::new())).await?;
                 timeout.as_mut().reset(tokio::time::Instant::now() + KEEPALIVE_DURATION);
             },

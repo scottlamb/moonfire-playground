@@ -11,7 +11,7 @@ pub mod rtcp;
 pub mod rtp;
 pub mod video;
 
-pub use parse::{Presentation, Stream};
+pub use parse::{Presentation, Stream, parse_setup};
 
 pub struct Credentials {
     pub username: String,
@@ -24,6 +24,7 @@ pub struct Session {
     stream: Framed<tokio::net::TcpStream, crate::Codec>,
     user_agent: String,
     cseq: u32,
+    session_id: Option<String>,
 }
 
 /// Handles data from a RTSP data channel.
@@ -94,6 +95,7 @@ impl Session {
             stream,
             user_agent: "moonfire-rtsp test".to_string(),
             cseq: 1,
+            session_id: None,
         })
     }
 
@@ -159,7 +161,7 @@ impl Session {
             .request_uri(url.clone())
             .build(Bytes::new());
         let resp = self.send(&mut req).await?;
-        parse::parse(url, resp)
+        parse::parse_describe(url, resp)
     }
 
     pub async fn next(&mut self) -> Option<Result<crate::ReceivedMessage, Error>> {

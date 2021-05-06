@@ -50,6 +50,12 @@ pub struct Stream {
     /// request, or compared directly to the `url` of a `PLAY` response's
     /// `RTP-Info` header.
     pub control: String,
+
+    /// The RTP synchronization source (SSRC), as defined in
+    /// [RFC 3550](https://tools.ietf.org/html/rfc3550). This is normally
+    /// supplied in the `SETUP` response's `Transport` header. Reolink cameras
+    /// instead supply it in the `PLAY` response's `RTP-Info` header.
+    pub ssrc: Option<u32>,
 }
 
 /// Splits the string on the first occurrence of the specified delimiter and
@@ -162,12 +168,13 @@ impl Stream {
             rtp_payload_type,
             metadata,
             control,
+            ssrc: None,
         })
     }
 }
 
-/// Parses a successful RTSP response into a [Presentation].
-pub(crate) fn parse(request_url: Url, response: rtsp_types::Response<Bytes>) -> Result<Presentation, Error> {
+/// Parses a successful RTSP `DESCRIBE` response into a [Presentation].
+pub(crate) fn parse_describe(request_url: Url, response: rtsp_types::Response<Bytes>) -> Result<Presentation, Error> {
     if !matches!(response.header(&rtsp_types::headers::CONTENT_TYPE), Some(v) if v.as_str() == "application/sdp") {
         bail!("Describe response not of expected application/sdp content type: {:#?}", &response);
     }
@@ -206,6 +213,38 @@ pub(crate) fn parse(request_url: Url, response: rtsp_types::Response<Bytes>) -> 
     })
 }
 
+pub fn parse_setup(
+    response: rtsp_types::Response<Bytes>,
+    session_id: &mut Option<String>,
+    stream: &mut Stream,
+) -> Result<(), Error> {
+    let response_session = response.header(&rtsp_types::headers::SESSION)
+        .ok_or_else(|| format_err!("SETUP response has no Session header"))?;
+    let response_session_id = match response_session.as_str().find(';') {
+        None => response_session.as_str(),
+        Some(i) => &response_session.as_str()[..i],
+    };
+    match session_id {
+      Some(old) if old != response_session_id => {
+        bail!("SETUP response changed session id from {:?} to {:?}",
+              old, response_session_id);
+      },
+      Some(_) => {},
+      None => *session_id = Some(response_session_id.to_owned()),
+    };
+    let transport = response.header(&rtsp_types::headers::TRANSPORT)
+        .ok_or_else(|| format_err!("SETUP response has no Transport header"))?;
+    for part in transport.as_str().split(';') {
+        if let Some(ssrc) = part.strip_prefix("ssrc=") {
+            let ssrc = u32::from_str_radix(ssrc, 16)
+                .map_err(|_| format_err!("Unparseable ssrc {}", ssrc))?;
+            stream.ssrc = Some(ssrc);
+            break;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
@@ -214,22 +253,24 @@ mod tests {
 
     use crate::client::video::Metadata;
 
-    fn parse(raw_url: &'static str, raw_response: &'static [u8])
+    fn response(raw: &'static [u8]) -> rtsp_types::Response<Bytes> {
+        let (msg, len) = rtsp_types::Message::parse(raw).unwrap();
+        assert_eq!(len, raw.len());
+        match msg {
+            rtsp_types::Message::Response(r) => r.map_body(|b| Bytes::from_static(b)),
+            _ => panic!("unexpected message type"),
+        }
+    }
+
+    fn parse_describe(raw_url: &'static str, raw_response: &'static [u8])
         -> Result<super::Presentation, Error> {
         let url = Url::parse(raw_url).unwrap();
-        let (msg, len) = rtsp_types::Message::parse(raw_response).unwrap();
-        assert_eq!(len, raw_response.len());
-        let response = match msg {
-        rtsp_types::Message::Response(r) => r,
-        _ => panic!("unexpected message type"),
-        };
-        let response = response.map_body(|b| Bytes::from_static(b));
-        super::parse(url, response)
+        super::parse_describe(url, response(raw_response))
     }
 
     #[test]
     fn dahua_h264_aac_onvif() {
-        let p = parse(
+        let mut p = parse_describe(
             "rtsp://192.168.5.111:554/cam/realmonitor?channel=1&subtype=1&unicast=true&proto=Onvif",
             include_bytes!("testdata/dahua_describe_h264_aac_onvif.txt")).unwrap();
         assert_eq!(
@@ -266,11 +307,20 @@ mod tests {
         assert_eq!(p.streams[2].rtp_payload_type, 107);
         assert_eq!(p.streams[2].clock_rate, 90_000);
         assert!(p.streams[2].metadata.is_none());
+
+        let mut session_id = None;
+        super::parse_setup(
+            response(include_bytes!("testdata/dahua_setup.txt")),
+            &mut session_id,
+            &mut p.streams[0]
+        ).unwrap();
+        assert_eq!(session_id, Some("634214675641".to_owned()));
+        assert_eq!(p.streams[0].ssrc, Some(0x30a98ee7));
     }
 
     #[test]
     fn dahua_h265_pcma() {
-        let p = parse(
+        let p = parse_describe(
             "rtsp://192.168.5.111:554/cam/realmonitor?channel=1&subtype=2",
             include_bytes!("testdata/dahua_describe_h265_pcma.txt")).unwrap();
 
@@ -288,7 +338,7 @@ mod tests {
 
     #[test]
     fn hikvision() {
-        let p = parse(
+        let mut p = parse_describe(
             "rtsp://192.168.5.106:554/Streaming/Channels/101?transportmode=unicast&Profile=Profile_1",
             include_bytes!("testdata/hikvision_describe.txt")).unwrap();
         assert_eq!(
@@ -317,11 +367,20 @@ mod tests {
         assert_eq!(p.streams[1].rtp_payload_type, 107);
         assert_eq!(p.streams[1].clock_rate, 90_000);
         assert!(p.streams[1].metadata.is_none());
+
+        let mut session_id = None;
+        super::parse_setup(
+            response(include_bytes!("testdata/hikvision_setup.txt")),
+            &mut session_id,
+            &mut p.streams[0]
+        ).unwrap();
+        assert_eq!(session_id, Some("2115183928".to_owned()));
+        assert_eq!(p.streams[0].ssrc, Some(0x63c096a4));
     }
 
     #[test]
     fn reolink() {
-        let p = parse(
+        let mut p = parse_describe(
             "rtsp://192.168.5.206:554/h264Preview_01_main",
             include_bytes!("testdata/reolink_describe.txt")).unwrap();
         assert_eq!(
@@ -350,5 +409,14 @@ mod tests {
         assert_eq!(p.streams[1].rtp_payload_type, 97);
         assert_eq!(p.streams[1].clock_rate, 16_000);
         assert!(p.streams[1].metadata.is_none());
+
+        let mut session_id = None;
+        super::parse_setup(
+            response(include_bytes!("testdata/reolink_setup.txt")),
+            &mut session_id,
+            &mut p.streams[0]
+        ).unwrap();
+        assert_eq!(session_id, Some("F8F8E425".to_owned()));
+        assert_eq!(p.streams[0].ssrc, None);
     }
 }
