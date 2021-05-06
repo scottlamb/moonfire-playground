@@ -254,8 +254,8 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
 impl<W: AsyncWrite + AsyncSeek + Send + Unpin> VideoHandler for Mp4Writer<W> {
     type Metadata = crate::client::video::h264::Metadata;
 
-    async fn metadata_change(&mut self, _metadata: &Self::Metadata) -> Result<(), failure::Error> {
-        bail!("metadata change unimplemented")
+    async fn metadata_change(&mut self, metadata: &Self::Metadata) -> Result<(), failure::Error> {
+        bail!("metadata change unimplemented. new metadata: {:#?}", metadata)
     }
 
     async fn picture(&mut self, mut picture: crate::client::video::Picture) -> Result<(), failure::Error> {

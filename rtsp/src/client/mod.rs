@@ -11,7 +11,7 @@ pub mod rtcp;
 pub mod rtp;
 pub mod video;
 
-pub use parse::{Presentation, Stream, parse_setup};
+pub use parse::{Presentation, Stream, join_control, parse_play, parse_setup};
 
 pub struct Credentials {
     pub username: String,

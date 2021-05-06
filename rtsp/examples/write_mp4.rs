@@ -3,7 +3,7 @@
 use bytes::{Buf, Bytes};
 use failure::{Error, bail, format_err};
 use log::{debug, error, info, log_enabled, trace};
-use moonfire_rtsp::client::ChannelHandler;
+use moonfire_rtsp::client::{ChannelHandler, join_control};
 use moonfire_rtsp::client::video::h264;
 use std::{fmt::Write, path::PathBuf, str::FromStr};
 use structopt::StructOpt;
@@ -78,64 +78,51 @@ async fn main_inner() -> Result<(), Error> {
     })).await?;
 
     // DESCRIBE. https://tools.ietf.org/html/rfc2326#section-10.2
-    let mut describe = cli.describe(opt.url).await?;
-    debug!("DESCRIBE response: {:#?}", &describe);
-    let video_stream = describe.streams.iter_mut()
-        .find(|s| s.media == "video")
+    let mut presentation = cli.describe(opt.url).await?;
+    debug!("DESCRIBE response: {:#?}", &presentation);
+    let video_stream_i = presentation.streams.iter()
+        .position(|s| s.media == "video")
         .ok_or_else(|| format_err!("couldn't find video stream"))?;
-    let video_metadata = video_stream.metadata.as_ref().unwrap().clone();
+    let video_metadata = presentation.streams[video_stream_i].metadata.as_ref().unwrap().clone();
     info!("video metadata: {:#?}", &video_metadata);
 
     // SETUP. https://tools.ietf.org/html/rfc2326#section-10.4
     let mut session_id = None;
     let setup_resp = cli.send(
         &mut rtsp_types::Request::builder(rtsp_types::Method::Setup, rtsp_types::Version::V1_0)
-        .request_uri(describe.base_url.join(&video_stream.control)?)
+        .request_uri(join_control(&presentation.base_url, &presentation.streams[video_stream_i].control)?)
         .header(rtsp_types::headers::TRANSPORT, "RTP/AVP/TCP;unicast;interleaved=0-1".to_owned())
         .header(moonfire_rtsp::X_DYNAMIC_RATE.clone(), "1".to_owned())
         .build(Bytes::new())).await?;
     debug!("SETUP response: {:#?}", &setup_resp);
-    moonfire_rtsp::client::parse_setup(setup_resp, &mut session_id, video_stream)?;
+    moonfire_rtsp::client::parse_setup(
+        setup_resp,
+        &mut session_id,
+        &mut presentation.streams[video_stream_i]
+    )?;
 
     // PLAY. https://tools.ietf.org/html/rfc2326#section-10.5
     let play_resp = cli.send(
         &mut rtsp_types::Request::builder(rtsp_types::Method::Play, rtsp_types::Version::V1_0)
-        .request_uri(describe.base_url.clone())
+        .request_uri(join_control(&presentation.base_url, &presentation.control)?)
         .header(rtsp_types::headers::SESSION, session_id.as_deref().unwrap())
         .header(rtsp_types::headers::RANGE, "npt=0.000-".to_owned())
         .build(Bytes::new())).await?;
-    let rtp_info = play_resp.header(&rtsp_types::headers::RTP_INFO).expect("has RTP-Info");
-    let mut video_seq = None;
-    let mut video_rtptime = None;
-    for stream in rtp_info.as_str().split(',') {
-        let stream = stream.trim();
-        let mut parts = stream.split(';');
-        let url_part = parts.next().unwrap();
-        assert!(url_part.starts_with("url="));
-        if &url_part["url=".len()..] != video_stream.control {
-           continue;
-        }
-        for part in parts {
-            let (key, value) = split_key_value(part).unwrap();
-            match key {
-                "seq" => video_seq = Some(u16::from_str_radix(value, 10).unwrap()),
-                "rtptime" => video_rtptime = Some(u32::from_str_radix(value, 10).unwrap()),
-                _ => {},
-            }
-         }
-    }
-    let video_seq = video_seq.unwrap();
-    let video_rtptime = video_rtptime.unwrap();
-    dbg!(&play_resp);
+    moonfire_rtsp::client::parse_play(play_resp, &mut presentation)?;
 
     // Read RTP data.
     let out = tokio::fs::File::create(opt.out).await?;
     let mp4_vid = moonfire_rtsp::mp4::Mp4Writer::new(video_metadata.clone(), out).await?;
     let to_vid = moonfire_rtsp::client::video::h264::VideoAccessUnitHandler::new(video_metadata.clone(), mp4_vid);
     //let mut print_au = moonfire_rtsp::client::video::h264::PrintAccessUnitHandler::new(&video_metadata)?;
-    let mut h264_timeline = moonfire_rtsp::Timeline::new(video_rtptime, video_stream.clock_rate);
+    let video_stream = &presentation.streams[video_stream_i];
+    let mut h264_timeline = moonfire_rtsp::Timeline::new(video_stream.initial_rtptime.unwrap(), video_stream.clock_rate);
     let h264 = moonfire_rtsp::client::video::h264::Handler::new(to_vid);
-    let mut h264_rtp = moonfire_rtsp::client::rtp::StrictSequenceChecker::new(video_stream.ssrc.unwrap(), video_seq, h264);
+    let mut h264_rtp = moonfire_rtsp::client::rtp::StrictSequenceChecker::new(
+        video_stream.ssrc.unwrap(),
+        video_stream.initial_seq.unwrap(),
+        h264
+    );
     let mut h264_rtcp = moonfire_rtsp::client::rtcp::TimestampPrinter::new();
 
     let timeout = tokio::time::sleep(KEEPALIVE_DURATION);
@@ -160,7 +147,7 @@ async fn main_inner() -> Result<(), Error> {
             () = &mut timeout => {
                 cli.send_nowait(
                     &mut rtsp_types::Request::builder(rtsp_types::Method::GetParameter, rtsp_types::Version::V1_0)
-                    .request_uri(describe.base_url.clone())
+                    .request_uri(presentation.base_url.clone())
                     .header(rtsp_types::headers::SESSION, session_id.as_deref().unwrap())
                     .build(Bytes::new())).await?;
                 timeout.as_mut().reset(tokio::time::Instant::now() + KEEPALIVE_DURATION);

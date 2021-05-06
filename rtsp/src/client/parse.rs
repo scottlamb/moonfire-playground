@@ -8,6 +8,7 @@ use std::convert::TryFrom;
 pub struct Presentation {
     pub streams: Vec<Stream>,
     pub base_url: Url,
+    pub control: String,
     pub accept_dynamic_rate: bool,
     sdp: SessionDescription,
 }
@@ -45,10 +46,9 @@ pub struct Stream {
     /// be an enum or something.
     pub metadata: Option<crate::client::video::h264::Metadata>,
 
-    /// The specified control URL, as a raw string.
-    /// This can be used via `base_url.join(control)` when creating a `SETUP`
-    /// request, or compared directly to the `url` of a `PLAY` response's
-    /// `RTP-Info` header.
+    /// The specified control URL.
+    /// This is needed to send `SETUP` requests and interpret the `PLAY`
+    /// response's `RTP-Info` header.
     pub control: String,
 
     /// The RTP synchronization source (SSRC), as defined in
@@ -56,6 +56,24 @@ pub struct Stream {
     /// supplied in the `SETUP` response's `Transport` header. Reolink cameras
     /// instead supply it in the `PLAY` response's `RTP-Info` header.
     pub ssrc: Option<u32>,
+
+    /// The initial RTP sequence number, as specified in the `PLAY` response's
+    /// `RTP-Info` header.
+    pub initial_seq: Option<u16>,
+
+    /// The initial RTP timestamp, as specified in the `PLAY` response's
+    /// `RTP-Info` header.
+    pub initial_rtptime: Option<u32>,
+}
+
+pub fn join_control(base_url: &Url, control: &str) -> Result<Url, Error> {
+    //let control_value = control_value.ok_or_else(|| format_err!("control attribute has no value"))?;
+    if control == "*" {
+        return Ok(base_url.clone());
+    }
+    Ok(base_url.join(control).with_context(|_| {
+        format_err!("unable to join base url {} with control url {:?}", base_url, control)
+    })?)
 }
 
 /// Splits the string on the first occurrence of the specified delimiter and
@@ -71,7 +89,7 @@ impl Stream {
     /// Parses from a [MediaDescription].
     /// On failure, returns an error which is expected to be supplemented with
     /// the [MediaDescription] debug string.
-    fn parse(media_description: &MediaDescription) -> Result<Stream, Error> {
+    fn parse(base_url: &Url, media_description: &MediaDescription) -> Result<Stream, Error> {
         // https://tools.ietf.org/html/rfc8866#section-5.14 says "If the <proto>
         // sub-field is "RTP/AVP" or "RTP/SAVP" the <fmt> sub-fields contain RTP
         // payload type numbers."
@@ -129,8 +147,8 @@ impl Stream {
                     fmtp = Some(v);
                 }
             } else if a.key == "control" {
-                control = Some(a.value.as_ref()
-                    .ok_or_else(|| format_err!("control attribute has no value"))?.clone());
+                //control = Some(join_control(base_url, a.value.as_deref())?);
+                control = a.value.clone();
             }
         }
         let control = control.ok_or_else(|| format_err!("no control url"))?;
@@ -169,6 +187,8 @@ impl Stream {
             metadata,
             control,
             ssrc: None,
+            initial_rtptime: None,
+            initial_seq: None,
         })
     }
 }
@@ -189,26 +209,37 @@ pub(crate) fn parse_describe(request_url: Url, response: rtsp_types::Response<By
         }
     }
 
+    // https://tools.ietf.org/html/rfc2326#appendix-C.1.1
+    let base_url = response.header(&rtsp_types::headers::CONTENT_BASE)
+        .or_else(|| response.header(&rtsp_types::headers::CONTENT_LOCATION))
+        .map(|v| Url::parse(v.as_str()))
+        .unwrap_or(Ok(request_url))?;
+
+    let mut control = None;
+    for a in &sdp.attributes {
+        if a.key == "control" {
+            //control = Some(join_control(&base_url, a.value.as_deref())?);
+            control = a.value.clone();
+            break;
+        }
+    }
+    let control = control.ok_or_else(|| format_err!("no control url"))?;
+
     let streams = sdp.media_descriptions
         .iter()
         .enumerate()
-        .map(|(i, m)| Stream::parse(&m)
+        .map(|(i, m)| Stream::parse(&base_url, &m)
             .with_context(|_| format!("Unable to parse stream {}: {:#?}", i, &m))
             .map_err(Error::from))
         .collect::<Result<Vec<Stream>, Error>>()?;
 
     let accept_dynamic_rate = matches!(response.header(&crate::X_ACCEPT_DYNAMIC_RATE), Some(h) if h.as_str() == "1");
-
-    // RFC 2326 section C.1.1.
-    let base_url = response.header(&rtsp_types::headers::CONTENT_BASE)
-        .or_else(|| response.header(&rtsp_types::headers::CONTENT_LOCATION))
-        .map(|v| Url::parse(v.as_str()))
-        .unwrap_or(Ok(request_url))?;
     
     Ok(Presentation {
         streams,
         accept_dynamic_rate,
         base_url,
+        control,
         sdp,
     })
 }
@@ -245,6 +276,51 @@ pub fn parse_setup(
     Ok(())
 }
 
+pub fn parse_play(
+    response: rtsp_types::Response<Bytes>,
+    presentation: &mut Presentation,
+) -> Result<(), Error> {
+    // https://tools.ietf.org/html/rfc2326#section-12.33
+    let rtp_info = response.header(&rtsp_types::headers::RTP_INFO)
+        .ok_or_else(|| format_err!("PLAY response has no RTP-Info header"))?;
+    for s in rtp_info.as_str().split(',') {
+        let s = s.trim();
+        let mut parts = s.split(';');
+        let url = parts
+            .next()
+            .expect("split always returns at least one part")
+            .strip_prefix("url=")
+            .ok_or_else(|| format_err!("RTP-Info missing stream URL"))?;
+        let stream = presentation.streams
+            .iter_mut()
+            .find(|s| s.control == url)
+            .ok_or_else(|| format_err!("can't find RTP-Info stream {}", url))?;
+        for part in parts {
+            let (key, value) = split_once(part, '=')
+                .ok_or_else(|| format_err!("RTP-Info param has no ="))?;
+            match key {
+                "seq" => {
+                    let seq = u16::from_str_radix(value, 10)
+                        .map_err(|_| format_err!("bad seq {:?}", value))?;
+                    stream.initial_seq = Some(seq);
+                },
+                "rtptime" => {
+                    let rtptime = u32::from_str_radix(value, 10)
+                        .map_err(|_| format_err!("bad rtptime {:?}", value))?;
+                    stream.initial_rtptime = Some(rtptime);
+                },
+                "ssrc" => {
+                    let ssrc = u32::from_str_radix(value, 16)
+                        .map_err(|_| format_err!("Unparseable ssrc {}", value))?;
+                    stream.ssrc = Some(ssrc);
+                },
+                _ => {},
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
@@ -270,6 +346,7 @@ mod tests {
 
     #[test]
     fn dahua_h264_aac_onvif() {
+        // DESCRIBE.
         let mut p = parse_describe(
             "rtsp://192.168.5.111:554/cam/realmonitor?channel=1&subtype=1&unicast=true&proto=Onvif",
             include_bytes!("testdata/dahua_describe_h264_aac_onvif.txt")).unwrap();
@@ -308,6 +385,7 @@ mod tests {
         assert_eq!(p.streams[2].clock_rate, 90_000);
         assert!(p.streams[2].metadata.is_none());
 
+        // SETUP.
         let mut session_id = None;
         super::parse_setup(
             response(include_bytes!("testdata/dahua_setup.txt")),
@@ -316,6 +394,18 @@ mod tests {
         ).unwrap();
         assert_eq!(session_id, Some("634214675641".to_owned()));
         assert_eq!(p.streams[0].ssrc, Some(0x30a98ee7));
+
+        // PLAY.
+        super::parse_play(
+            response(include_bytes!("testdata/dahua_play.txt")),
+            &mut p
+        ).unwrap();
+        assert_eq!(p.streams[0].initial_seq, Some(47121));
+        assert_eq!(p.streams[0].initial_rtptime, Some(3475222385));
+        assert_eq!(p.streams[1].initial_seq, Some(45186));
+        assert_eq!(p.streams[1].initial_rtptime, Some(2234446919));
+        assert_eq!(p.streams[2].initial_seq, Some(36583));
+        assert_eq!(p.streams[2].initial_rtptime, Some(816418535));
     }
 
     #[test]
@@ -338,6 +428,7 @@ mod tests {
 
     #[test]
     fn hikvision() {
+        // DESCRIBE.
         let mut p = parse_describe(
             "rtsp://192.168.5.106:554/Streaming/Channels/101?transportmode=unicast&Profile=Profile_1",
             include_bytes!("testdata/hikvision_describe.txt")).unwrap();
@@ -368,18 +459,30 @@ mod tests {
         assert_eq!(p.streams[1].clock_rate, 90_000);
         assert!(p.streams[1].metadata.is_none());
 
+        // SETUP.
         let mut session_id = None;
         super::parse_setup(
             response(include_bytes!("testdata/hikvision_setup.txt")),
             &mut session_id,
             &mut p.streams[0]
         ).unwrap();
-        assert_eq!(session_id, Some("2115183928".to_owned()));
-        assert_eq!(p.streams[0].ssrc, Some(0x63c096a4));
+        assert_eq!(session_id, Some("708345999".to_owned()));
+        assert_eq!(p.streams[0].ssrc, Some(0x4cacc3d1));
+
+        // PLAY.
+        super::parse_play(
+            response(include_bytes!("testdata/hikvision_play.txt")),
+            &mut p
+        ).unwrap();
+        assert_eq!(p.streams[0].initial_seq, Some(24104));
+        assert_eq!(p.streams[0].initial_rtptime, Some(1270711678));
+        assert_eq!(p.streams[1].initial_seq, None);
+        assert_eq!(p.streams[1].initial_rtptime, None);
     }
 
     #[test]
     fn reolink() {
+        // DESCRIBE.
         let mut p = parse_describe(
             "rtsp://192.168.5.206:554/h264Preview_01_main",
             include_bytes!("testdata/reolink_describe.txt")).unwrap();
@@ -410,6 +513,7 @@ mod tests {
         assert_eq!(p.streams[1].clock_rate, 16_000);
         assert!(p.streams[1].metadata.is_none());
 
+        // SETUP.
         let mut session_id = None;
         super::parse_setup(
             response(include_bytes!("testdata/reolink_setup.txt")),
@@ -418,5 +522,17 @@ mod tests {
         ).unwrap();
         assert_eq!(session_id, Some("F8F8E425".to_owned()));
         assert_eq!(p.streams[0].ssrc, None);
+
+        // PLAY.
+        super::parse_play(
+            response(include_bytes!("testdata/reolink_play.txt")),
+            &mut p
+        ).unwrap();
+        assert_eq!(p.streams[0].initial_seq, Some(16852));
+        assert_eq!(p.streams[0].initial_rtptime, Some(1070938629));
+        assert_eq!(p.streams[0].ssrc, Some(0xdcc4a0d8));
+        assert_eq!(p.streams[1].initial_seq, Some(39409));
+        assert_eq!(p.streams[1].initial_rtptime, Some(3075976528));
+        assert_eq!(p.streams[1].ssrc, Some(0x9fc9fff8));
     }
 }
