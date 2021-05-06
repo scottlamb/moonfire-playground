@@ -209,27 +209,29 @@ pub(crate) fn parse(request_url: Url, response: rtsp_types::Response<Bytes>) -> 
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
+    use failure::Error;
     use url::Url;
 
     use crate::client::video::Metadata;
 
-    fn parse_response(raw: &'static [u8]) -> rtsp_types::Response<Bytes> {
-        let (msg, len) = rtsp_types::Message::parse(raw).unwrap();
-        assert_eq!(len, raw.len());
-        let resp = match msg {
+    fn parse(raw_url: &'static str, raw_response: &'static [u8])
+        -> Result<super::Presentation, Error> {
+        let url = Url::parse(raw_url).unwrap();
+        let (msg, len) = rtsp_types::Message::parse(raw_response).unwrap();
+        assert_eq!(len, raw_response.len());
+        let response = match msg {
         rtsp_types::Message::Response(r) => r,
         _ => panic!("unexpected message type"),
         };
-        resp.map_body(|b| Bytes::from_static(b))
+        let response = response.map_body(|b| Bytes::from_static(b));
+        super::parse(url, response)
     }
 
     #[test]
     fn dahua_h264_aac_onvif() {
-        let request_url = Url::parse(
-            "rtsp://192.168.5.111:554/cam/realmonitor?channel=1&subtype=1&unicast=true&proto=Onvif")
-            .unwrap();
-        let response = parse_response(include_bytes!("testdata/dahua_describe_h264_aac_onvif.txt"));
-        let p = super::parse(request_url, response).unwrap();
+        let p = parse(
+            "rtsp://192.168.5.111:554/cam/realmonitor?channel=1&subtype=1&unicast=true&proto=Onvif",
+            include_bytes!("testdata/dahua_describe_h264_aac_onvif.txt")).unwrap();
         assert_eq!(
             p.base_url.as_str(),
             "rtsp://192.168.5.111:554/cam/realmonitor?channel=1&subtype=1&unicast=true&proto=Onvif/");
@@ -264,5 +266,89 @@ mod tests {
         assert_eq!(p.streams[2].rtp_payload_type, 107);
         assert_eq!(p.streams[2].clock_rate, 90_000);
         assert!(p.streams[2].metadata.is_none());
+    }
+
+    #[test]
+    fn dahua_h265_pcma() {
+        let p = parse(
+            "rtsp://192.168.5.111:554/cam/realmonitor?channel=1&subtype=2",
+            include_bytes!("testdata/dahua_describe_h265_pcma.txt")).unwrap();
+
+        // Abridged test; similar to the other Dahua test.
+        assert_eq!(p.streams.len(), 2);
+        assert_eq!(p.streams[0].media, "video");
+        assert_eq!(p.streams[0].encoding_name, "H265");
+        assert_eq!(p.streams[0].rtp_payload_type, 98);
+        assert!(p.streams[1].metadata.is_none());
+        assert_eq!(p.streams[1].media, "audio");
+        assert_eq!(p.streams[1].encoding_name, "PCMA");
+        assert_eq!(p.streams[1].rtp_payload_type, 8);
+        assert!(p.streams[1].metadata.is_none());
+    }
+
+    #[test]
+    fn hikvision() {
+        let p = parse(
+            "rtsp://192.168.5.106:554/Streaming/Channels/101?transportmode=unicast&Profile=Profile_1",
+            include_bytes!("testdata/hikvision_describe.txt")).unwrap();
+        assert_eq!(
+            p.base_url.as_str(),
+            "rtsp://192.168.5.106:554/Streaming/Channels/101/");
+        assert!(!p.accept_dynamic_rate);
+
+        assert_eq!(p.streams.len(), 2);
+
+        // H.264 video stream.
+        assert_eq!(p.streams[0].control, "rtsp://192.168.5.106:554/Streaming/Channels/101/trackID=1?transportmode=unicast&profile=Profile_1");
+        assert_eq!(p.streams[0].media, "video");
+        assert_eq!(p.streams[0].encoding_name, "H264");
+        assert_eq!(p.streams[0].rtp_payload_type, 96);
+        assert_eq!(p.streams[0].clock_rate, 90_000);
+        let metadata = p.streams[0].metadata.as_ref().unwrap();
+        assert_eq!(metadata.rfc6381_codec(), "avc1.4D0029");
+        assert_eq!(metadata.pixel_dimensions(), (1920, 1080));
+        assert_eq!(metadata.pixel_aspect_ratio(), None);
+        assert_eq!(metadata.frame_rate(), Some((2_000, 60_000)));
+
+        // ONVIF metadata stream.
+        assert_eq!(p.streams[1].control, "rtsp://192.168.5.106:554/Streaming/Channels/101/trackID=3?transportmode=unicast&profile=Profile_1");
+        assert_eq!(p.streams[1].media, "application");
+        assert_eq!(p.streams[1].encoding_name, "vnd.onvif.metadata");
+        assert_eq!(p.streams[1].rtp_payload_type, 107);
+        assert_eq!(p.streams[1].clock_rate, 90_000);
+        assert!(p.streams[1].metadata.is_none());
+    }
+
+    #[test]
+    fn reolink() {
+        let p = parse(
+            "rtsp://192.168.5.206:554/h264Preview_01_main",
+            include_bytes!("testdata/reolink_describe.txt")).unwrap();
+        assert_eq!(
+            p.base_url.as_str(),
+            "rtsp://192.168.5.206/h264Preview_01_main/");
+        assert!(!p.accept_dynamic_rate);
+
+        assert_eq!(p.streams.len(), 2);
+
+        // H.264 video stream.
+        assert_eq!(p.streams[0].control, "trackID=1");
+        assert_eq!(p.streams[0].media, "video");
+        assert_eq!(p.streams[0].encoding_name, "H264");
+        assert_eq!(p.streams[0].rtp_payload_type, 96);
+        assert_eq!(p.streams[0].clock_rate, 90_000);
+        let metadata = p.streams[0].metadata.as_ref().unwrap();
+        assert_eq!(metadata.rfc6381_codec(), "avc1.640033");
+        assert_eq!(metadata.pixel_dimensions(), (2560, 1440));
+        assert_eq!(metadata.pixel_aspect_ratio(), None);
+        assert_eq!(metadata.frame_rate(), None);
+
+        // audio stream
+        assert_eq!(p.streams[1].control, "trackID=2");
+        assert_eq!(p.streams[1].media, "audio");
+        assert_eq!(p.streams[1].encoding_name, "MPEG4-GENERIC");
+        assert_eq!(p.streams[1].rtp_payload_type, 97);
+        assert_eq!(p.streams[1].clock_rate, 16_000);
+        assert!(p.streams[1].metadata.is_none());
     }
 }
