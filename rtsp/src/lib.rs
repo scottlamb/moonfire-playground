@@ -145,7 +145,7 @@ struct Codec {
 
 /// Returns the range within `buf` that represents `subset`.
 /// If `subset` is empty, returns None; otherwise panics if `subset` is not within `buf`.
-fn as_range(buf: &BytesMut, subset: &[u8]) -> Option<std::ops::Range<usize>> {
+pub(crate) fn as_range(buf: &[u8], subset: &[u8]) -> Option<std::ops::Range<usize>> {
     if subset.is_empty() {
         return None;
     }

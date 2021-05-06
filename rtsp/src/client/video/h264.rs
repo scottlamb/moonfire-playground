@@ -77,10 +77,10 @@ impl<A: AccessUnitHandler + Send> crate::client::rtp::PacketHandler for Handler<
         // logic](https://docs.rs/rtp/0.2.2/rtp/codecs/h264/struct.H264Packet.html),
         // but it doesn't seem to match my use case. I want to iterate the NALs,
         // not re-encode them in Annex B format.
-        let seq = pkt.pkt.header.sequence_number;
+        let seq = pkt.sequence_number;
         let mut premark = match std::mem::replace(&mut self.state, HandlerState::Inactive) {
             HandlerState::Inactive => {
-                self.inner.start(&pkt.rtsp_ctx, pkt.timestamp, &pkt.pkt.header).await?;
+                self.inner.start(&pkt.rtsp_ctx, pkt.timestamp).await?;
                 PreMark {
                     timestamp: pkt.timestamp,
                     frag_buf: None
@@ -100,7 +100,7 @@ impl<A: AccessUnitHandler + Send> crate::client::rtp::PacketHandler for Handler<
                     bail!("Received packet with timestamp {} after marked packet with same timestamp at seq={:04x} {:#?}", pkt.timestamp, seq, &pkt.rtsp_ctx);
                 }
                 self.inner.end().await?;
-                self.inner.start(&pkt.rtsp_ctx, pkt.timestamp, &pkt.pkt.header).await?;
+                self.inner.start(&pkt.rtsp_ctx, pkt.timestamp).await?;
                 PreMark {
                     timestamp: pkt.timestamp,
                     frag_buf: None,
@@ -108,7 +108,7 @@ impl<A: AccessUnitHandler + Send> crate::client::rtp::PacketHandler for Handler<
             }
         };
 
-        let mut data = pkt.pkt.payload;
+        let mut data = pkt.payload;
         if data.is_empty() {
             bail!("Empty NAL at RTP seq {:04x}, {:#?}", seq, &pkt.rtsp_ctx);
         }
@@ -156,7 +156,7 @@ impl<A: AccessUnitHandler + Send> crate::client::rtp::PacketHandler for Handler<
                         if end {
                             self.frag_high_water = frag_buf.len();
                             self.inner.nal(frag_buf.freeze()).await?;
-                        } else if pkt.pkt.header.marker {
+                        } else if pkt.mark {
                             bail!("FU-A with MARK and no END at seq {:04x} {:#?}", seq, pkt.rtsp_ctx);
                         } else {
                             premark.frag_buf = Some(frag_buf);
@@ -167,7 +167,7 @@ impl<A: AccessUnitHandler + Send> crate::client::rtp::PacketHandler for Handler<
             },
             _ => bail!("bad nal header {:0x} at seq {:04x} {:#?}", nal_header, seq, &pkt.rtsp_ctx),
         }
-        if pkt.pkt.header.marker {
+        if pkt.mark {
             self.state = HandlerState::PostMark { timestamp: pkt.timestamp };
         } else {
             self.state = HandlerState::PreMark(premark);
@@ -180,7 +180,7 @@ impl<A: AccessUnitHandler + Send> crate::client::rtp::PacketHandler for Handler<
 #[async_trait]
 pub trait AccessUnitHandler {
     /// Starts an access unit.
-    async fn start(&mut self, rtsp_ctx: &crate::Context, timestamp: crate::Timestamp, hdr: &rtp::header::Header) -> Result<(), Error>;
+    async fn start(&mut self, rtsp_ctx: &crate::Context, timestamp: crate::Timestamp) -> Result<(), Error>;
 
     /// Processes a single NAL.
     /// Must be between `start` and `end` calls. `nal` is guaranteed to have a header byte.
@@ -224,7 +224,7 @@ impl<V: VideoHandler<Metadata = Metadata> + Send> VideoAccessUnitHandler<V> {
 
 #[async_trait]
 impl<V: VideoHandler<Metadata = Metadata> + Send> AccessUnitHandler for VideoAccessUnitHandler<V> {
-    async fn start(&mut self, _rtsp_ctx: &crate::Context, timestamp: crate::Timestamp, _hdr: &rtp::header::Header) -> Result<(), Error> {
+    async fn start(&mut self, _rtsp_ctx: &crate::Context, timestamp: crate::Timestamp) -> Result<(), Error> {
         if !matches!(self.state, VideoState::Unstarted) {
             bail!("access unit started in invalid state");
         }
@@ -329,7 +329,7 @@ impl PrintAccessUnitHandler {
 
 #[async_trait]
 impl AccessUnitHandler for PrintAccessUnitHandler {
-    async fn start(&mut self, _rtsp_ctx: &crate::Context, timestamp: crate::Timestamp, _hdr: &rtp::header::Header) -> Result<(), Error> {
+    async fn start(&mut self, _rtsp_ctx: &crate::Context, timestamp: crate::Timestamp) -> Result<(), Error> {
         info!("access unit with timestamp {}:", timestamp);
         Ok(())
     }
@@ -488,6 +488,16 @@ impl Metadata {
         avc_decoder_config.extend_from_slice(&pps_nal[..]);
         let pps_nal_end = avc_decoder_config.len();
         assert_eq!(avc_decoder_config.len(), 11 + sps_nal.len() + pps_nal.len());
+        let parsed = h264_reader::avcc::AvcDecoderConfigurationRecord::try_from(&avc_decoder_config[..])
+            .map_err(|e| format_err!("new AvcDecoderConfigurationRecord doesn't parse: {:#?}", e))?;
+        for s in parsed.sequence_parameter_sets() {
+            let s = s.map_err(|e| format_err!("bad SPS: {:#?}", e))?;
+            debug!("SPS: {:#?}", s);
+        }
+        for p in parsed.picture_parameter_sets() {
+            let p = p.map_err(|e| format_err!("bad PPS: {:#?}", e))?;
+            debug!("PPS: {:#?}", p);
+        }
 
         let (pixel_aspect_ratio, frame_rate);
         match sps.vui_parameters {

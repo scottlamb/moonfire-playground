@@ -1,17 +1,18 @@
 //! RTP handling.
 
 use async_trait::async_trait;
-use bytes::Bytes;
-use failure::{Error, bail};
+use bytes::{Buf, Bytes};
+use failure::{Error, bail, format_err};
 use log::{debug, trace};
 use pretty_hex::PrettyHex;
-use rtp::packetizer::Marshaller;
 
 #[derive(Debug)]
 pub struct Packet {
     pub rtsp_ctx: crate::Context,
     pub timestamp: crate::Timestamp,
-    pub pkt: rtp::packet::Packet,
+    pub sequence_number: u16,
+    pub mark: bool,
+    pub payload: Bytes,
 }
 
 #[async_trait]
@@ -78,28 +79,35 @@ impl<P: PacketHandler> StrictSequenceChecker<P> {
 
 #[async_trait]
 impl<P: PacketHandler + Send> super::ChannelHandler for StrictSequenceChecker<P> {
-    async fn data(&mut self, rtsp_ctx: crate::Context, timeline: &mut crate::Timeline, data: Bytes) -> Result<(), Error> {
-        let pkt = match rtp::packet::Packet::unmarshal(&data) {
-            Err(e) => bail!("corrupt RTP packet while expecting seq={:04x} at {:#?}: {}", self.next_seq, &rtsp_ctx, e),
-            Ok(p) => p,
-        };
-        let timestamp = match timeline.advance(pkt.header.timestamp) {
+    async fn data(&mut self, rtsp_ctx: crate::Context, timeline: &mut crate::Timeline, mut data: Bytes) -> Result<(), Error> {
+        let reader = rtp_rs::RtpReader::new(&data[..])
+            .map_err(|e| format_err!("corrupt RTP header while expecting seq={:04x} at {:#?}: {:?}", self.next_seq, &rtsp_ctx, e))?;
+        let sequence_number = u16::from_be_bytes([data[2], data[3]]);
+        let timestamp = match timeline.advance(reader.timestamp()) {
             Ok(ts) => ts,
-            Err(e) => return Err(e.context(format!("timestamp error in seq={:04x} {:#?}", pkt.header.sequence_number, &rtsp_ctx)).into()),
+            Err(e) => return Err(e.context(format!("timestamp error in seq={:04x} {:#?}", sequence_number, &rtsp_ctx)).into()),
         };
-        if pkt.header.ssrc != self.ssrc
-           || pkt.header.sequence_number.wrapping_sub(self.next_seq) > self.max_seq_skip {
+        let ssrc = reader.ssrc();
+        if ssrc != self.ssrc
+           || sequence_number.wrapping_sub(self.next_seq) > self.max_seq_skip {
             bail!("Expected ssrc={:08x} seq={:04x} got ssrc={:08x} seq={:04x} ts={} at {:#?}",
-                  self.ssrc, self.next_seq, pkt.header.ssrc, pkt.header.sequence_number, timestamp, &rtsp_ctx);
+                  self.ssrc, self.next_seq, ssrc, sequence_number, timestamp, &rtsp_ctx);
         }
-        debug!("pkt{} seq={:04x} ts={}", if pkt.header.marker { "   " } else { "(M)"}, self.next_seq, &timestamp);
+        let mark = reader.mark();
+        debug!("pkt{} seq={:04x} ts={}", if mark { "   " } else { "(M)"}, self.next_seq, &timestamp);
         trace!("{:?}", data.hex_dump());
-        self.next_seq = pkt.header.sequence_number.wrapping_add(1);
+        let payload_range = crate::as_range(&data, reader.payload())
+            .ok_or_else(|| format_err!("empty paylaod"))?;
+        data.truncate(payload_range.end);
+        data.advance(payload_range.start);
+        self.next_seq = sequence_number.wrapping_add(1);
         self.max_seq_skip = 0;
         self.inner.pkt(Packet {
             rtsp_ctx,
             timestamp,
-            pkt
+            sequence_number,
+            mark,
+            payload: data,
         }).await
     }
 

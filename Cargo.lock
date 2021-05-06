@@ -1073,7 +1073,7 @@ dependencies = [
  "once_cell",
  "pretty-hex",
  "rtcp",
- "rtp",
+ "rtp-rs",
  "rtsp-types",
  "sdp",
  "structopt",
@@ -1673,15 +1673,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "rtp"
-version = "0.2.2"
+name = "rtp-rs"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "303ebe763d2420cb09192bce85f11e38b3c34f8cc1d2f1ec4bd4da17def32429"
-dependencies = [
- "bytes",
- "rand",
- "thiserror",
-]
+checksum = "e1110d695193d446e901de09921ffbf2d86ae351bbfde9c5b53863ce177e17f5"
 
 [[package]]
 name = "rtsp-types"
