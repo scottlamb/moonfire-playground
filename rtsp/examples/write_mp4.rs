@@ -77,36 +77,19 @@ async fn main_inner() -> Result<(), Error> {
         password: opt.password,
     })).await?;
 
-    // OPTIONS. https://tools.ietf.org/html/rfc2326#section-10.1
-    let _options = cli.send(
-        &mut rtsp_types::Request::builder(rtsp_types::Method::Options, rtsp_types::Version::V1_0)
-        .request_uri(opt.url.clone())
-        .build(Bytes::new())).await?;
-
     // DESCRIBE. https://tools.ietf.org/html/rfc2326#section-10.2
     let describe = cli.describe(opt.url).await?;
     debug!("DESCRIBE response: {:#?}", &describe);
-    let video = describe.sdp.media_descriptions.first().expect("has a media description");
-    assert_eq!(video.media_name.media, "video");  // TODO: not guaranteed this is first.
-    let video_control_url_str = video.attribute("control").expect("has control attribute");
-    let video_fmtp = video.attribute("fmtp").expect("has fmtp");
-    let video_fmtp_params = &video_fmtp[video_fmtp.find(' ').unwrap() + 1..];
-    let mut video_metadata = None;
-    for p in video_fmtp_params.split(';') {
-        let (key, value) = split_key_value(p.trim()).unwrap();
-        if key == "sprop-parameter-sets" {
-            video_metadata = Some(h264::Metadata::from_sprop_parameter_sets(value)?);
-        }
-    }
-    let video_metadata = video_metadata.unwrap();
+    let video_stream = describe.streams.iter()
+        .find(|s| s.media == "video")
+        .ok_or_else(|| format_err!("couldn't find video stream"))?;
+    let video_metadata = video_stream.metadata.as_ref().unwrap();
     info!("video metadata: {:#?}", &video_metadata);
-
-    let video_control_url = describe.base_url.join(video_control_url_str).unwrap();
 
     // SETUP. https://tools.ietf.org/html/rfc2326#section-10.4
     let setup_resp = cli.send(
         &mut rtsp_types::Request::builder(rtsp_types::Method::Setup, rtsp_types::Version::V1_0)
-        .request_uri(video_control_url)
+        .request_uri(describe.base_url.join(&video_stream.control)?)
         .header(rtsp_types::headers::TRANSPORT, "RTP/AVP/TCP;unicast;interleaved=0-1".to_owned())
         .header(moonfire_rtsp::X_DYNAMIC_RATE.clone(), "1".to_owned())
         .build(Bytes::new())).await?;
@@ -141,7 +124,7 @@ async fn main_inner() -> Result<(), Error> {
         let mut parts = stream.split(';');
         let url_part = parts.next().unwrap();
         assert!(url_part.starts_with("url="));
-        if &url_part["url=".len()..] != video_control_url_str {
+        if &url_part["url=".len()..] != video_stream.control {
            continue;
         }
         for part in parts {
@@ -160,9 +143,9 @@ async fn main_inner() -> Result<(), Error> {
     // Read RTP data.
     let out = tokio::fs::File::create(opt.out).await?;
     let mp4_vid = moonfire_rtsp::mp4::Mp4Writer::new(video_metadata.clone(), out).await?;
-    let to_vid = moonfire_rtsp::client::video::h264::VideoAccessUnitHandler::new(video_metadata, mp4_vid);
+    let to_vid = moonfire_rtsp::client::video::h264::VideoAccessUnitHandler::new(video_metadata.clone(), mp4_vid);
     //let mut print_au = moonfire_rtsp::client::video::h264::PrintAccessUnitHandler::new(&video_metadata)?;
-    let mut h264_timeline = moonfire_rtsp::Timeline::new(video_rtptime, 90_000);
+    let mut h264_timeline = moonfire_rtsp::Timeline::new(video_rtptime, video_stream.clock_rate);
     let h264 = moonfire_rtsp::client::video::h264::Handler::new(to_vid);
     let mut h264_rtp = moonfire_rtsp::client::rtp::StrictSequenceChecker::new(video_ssrc, video_seq, h264);
     let mut h264_rtcp = moonfire_rtsp::client::rtcp::TimestampPrinter::new();

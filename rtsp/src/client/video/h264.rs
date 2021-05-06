@@ -408,8 +408,18 @@ impl std::fmt::Debug for Metadata {
 }
 
 impl Metadata {
-    /// Parses metadata from the `sprop-parameter-sets` of a SDP `fmtp` media attribute.
-    pub fn from_sprop_parameter_sets(sprop_parameter_sets: &str) -> Result<Self, Error> {
+    /// Parses metadata from the `format-specific-params` of a SDP `fmtp` media attribute.
+    pub fn from_format_specific_params(format_specific_params: &str) -> Result<Self, Error> {
+        let mut sprop_parameter_sets = None;
+        for p in format_specific_params.split(';') {
+            let (key, value) = crate::client::parse::split_once(p.trim(), '=').unwrap();
+            if key == "sprop-parameter-sets" {
+                sprop_parameter_sets = Some(value);
+            }
+        }
+        let sprop_parameter_sets = sprop_parameter_sets
+            .ok_or_else(|| format_err!("no sprop-parameter-sets in H.264 format-specific-params"))?;
+
         let mut sps_nal = None;
         let mut pps_nal = None;
         for nal in sprop_parameter_sets.split(',') {

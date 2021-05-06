@@ -1,15 +1,17 @@
 use async_trait::async_trait;
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use failure::{Error, bail, format_err};
 use futures::{SinkExt, StreamExt};
 use sdp::session_description::SessionDescription;
-use std::convert::TryFrom;
 use tokio_util::codec::Framed;
 use url::Url;
 
+mod parse;
 pub mod rtcp;
 pub mod rtp;
 pub mod video;
+
+pub use parse::{Presentation, Stream};
 
 pub struct Credentials {
     pub username: String,
@@ -151,31 +153,13 @@ impl Session {
         Ok(cseq)
     }
 
-    pub async fn describe(&mut self, url: Url) -> Result<DescribeResponse, Error> {
+    pub async fn describe(&mut self, url: Url) -> Result<Presentation, Error> {
         let mut req = rtsp_types::Request::builder(rtsp_types::Method::Describe, rtsp_types::Version::V1_0)
             .header(rtsp_types::headers::ACCEPT, "application/sdp")
             .request_uri(url.clone())
             .build(Bytes::new());
         let resp = self.send(&mut req).await?;
-
-        if !matches!(resp.header(&rtsp_types::headers::CONTENT_TYPE), Some(v) if v.as_str() == "application/sdp") {
-            bail!("Describe response not of expected application/sdp content type: {:#?}", &resp);
-        }
-        let mut cursor = std::io::Cursor::new(&resp.body()[..]);
-        let sdp = SessionDescription::unmarshal(&mut cursor)?;
-        if cursor.has_remaining() {
-            bail!("garbage after sdp: {:?}", &resp.body()[usize::try_from(cursor.position()).unwrap()..]);
-        }
-        let accept_dynamic_rate = matches!(resp.header(&crate::X_ACCEPT_DYNAMIC_RATE), Some(h) if h.as_str() == "1");
-        let base_url = resp.header(&rtsp_types::headers::CONTENT_BASE)
-            .or_else(|| resp.header(&rtsp_types::headers::CONTENT_LOCATION))
-            .map(|v| Url::parse(v.as_str()))
-            .unwrap_or(Ok(url))?;
-        Ok(DescribeResponse {
-            accept_dynamic_rate,
-            base_url,
-            sdp,
-        })
+        parse::parse(url, resp)
     }
 
     pub async fn next(&mut self) -> Option<Result<crate::ReceivedMessage, Error>> {
