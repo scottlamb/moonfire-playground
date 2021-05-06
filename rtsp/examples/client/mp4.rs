@@ -1,4 +1,4 @@
-//! A proof-of-concept `.mp4` writer.
+//! Proof-of-concept `.mp4` writer.
 //!
 //! This writes media data (`mdat`) to a stream, buffering metadata for a
 //! `moov` atom at the end. This avoids the need to buffer the media data
@@ -11,13 +11,16 @@
 //! `.mp4` files.
 
 use async_trait::async_trait;
-use bytes::{Buf, BufMut, BytesMut};
-use failure::{Error, bail};
-use log::info;
-use std::{convert::TryFrom, io::SeekFrom};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use failure::{Error, bail, format_err};
+use log::{debug, info, trace};
+use moonfire_rtsp::client::video::{Metadata, VideoHandler, h264};
+use moonfire_rtsp::client::{ChannelHandler, join_control};
+use std::convert::TryFrom;
+use std::io::SeekFrom;
+use std::path::PathBuf;
 use tokio::io::{AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
-
-use crate::client::video::{Metadata, VideoHandler, h264};
+use url::Url;
 
 /// Writes a box length for everything appended in the supplied scope.
 /// Used only within FileBuilder::build (and methods it calls internally).
@@ -42,7 +45,7 @@ macro_rules! write_box {
 pub struct Mp4Writer<W: AsyncWrite + AsyncSeek + Send + Unpin> {
     mdat_start: u32,
     mdat_len: u32,
-    metadata: crate::client::video::h264::Metadata,
+    metadata: moonfire_rtsp::client::video::h264::Metadata,
     last_pts: Option<u64>,
 
     /// Differences between pairs of pts, in timescale units.
@@ -62,7 +65,7 @@ pub struct Mp4Writer<W: AsyncWrite + AsyncSeek + Send + Unpin> {
 }
 
 impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
-    pub async fn new(metadata: crate::client::video::h264::Metadata, mut inner: W) -> Result<Self, Error> {
+    pub async fn new(metadata: moonfire_rtsp::client::video::h264::Metadata, mut inner: W) -> Result<Self, Error> {
         let mut buf = BytesMut::new();
         write_box!(&mut buf, b"ftyp", {
             buf.extend_from_slice(&[
@@ -86,6 +89,11 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
             mdat_len: 8,
         })
     }
+
+    /*/// Returns the total duration, as clock ticks and clock rate (Hz).
+    pub fn duration(&self) -> (u64, u32) {
+        (self.tot_duration, 90_000)
+    }*/
 
     pub async fn finish(mut self) -> Result<(), Error> {
         if self.last_pts.is_some() {
@@ -252,13 +260,13 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
 
 #[async_trait]
 impl<W: AsyncWrite + AsyncSeek + Send + Unpin> VideoHandler for Mp4Writer<W> {
-    type Metadata = crate::client::video::h264::Metadata;
+    type Metadata = moonfire_rtsp::client::video::h264::Metadata;
 
     async fn metadata_change(&mut self, metadata: &Self::Metadata) -> Result<(), failure::Error> {
         bail!("metadata change unimplemented. new metadata: {:#?}", metadata)
     }
 
-    async fn picture(&mut self, mut picture: crate::client::video::Picture) -> Result<(), failure::Error> {
+    async fn picture(&mut self, mut picture: moonfire_rtsp::client::video::Picture) -> Result<(), failure::Error> {
         if let Some(last_pts) = self.last_pts.replace(picture.rtp_timestamp.timestamp) {
             let duration = picture.rtp_timestamp.timestamp.checked_sub(last_pts).unwrap();
             assert!(duration > 0);
@@ -279,4 +287,94 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> VideoHandler for Mp4Writer<W> {
         }
         Ok(())
     }
+}
+
+pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credentials>, out: PathBuf) -> Result<(), Error> {
+    let stop = tokio::signal::ctrl_c();
+
+    // DESCRIBE. https://tools.ietf.org/html/rfc2326#section-10.2
+    let mut cli = moonfire_rtsp::client::Session::connect(&url, credentials).await?;
+    let mut presentation = cli.describe(url).await?;
+    debug!("DESCRIBE response: {:#?}", &presentation);
+    let video_stream_i = presentation.streams.iter()
+        .position(|s| s.media == "video")
+        .ok_or_else(|| format_err!("couldn't find video stream"))?;
+    let video_metadata = presentation.streams[video_stream_i].metadata.as_ref().unwrap().clone();
+    info!("video metadata: {:#?}", &video_metadata);
+
+    // SETUP. https://tools.ietf.org/html/rfc2326#section-10.4
+    let mut session_id = None;
+    let setup_resp = cli.send(
+        &mut rtsp_types::Request::builder(rtsp_types::Method::Setup, rtsp_types::Version::V1_0)
+        .request_uri(join_control(&presentation.base_url, &presentation.streams[video_stream_i].control)?)
+        .header(rtsp_types::headers::TRANSPORT, "RTP/AVP/TCP;unicast;interleaved=0-1".to_owned())
+        .header(moonfire_rtsp::X_DYNAMIC_RATE.clone(), "1".to_owned())
+        .build(Bytes::new())).await?;
+    debug!("SETUP response: {:#?}", &setup_resp);
+    moonfire_rtsp::client::parse_setup(
+        setup_resp,
+        &mut session_id,
+        &mut presentation.streams[video_stream_i]
+    )?;
+
+    // PLAY. https://tools.ietf.org/html/rfc2326#section-10.5
+    let play_resp = cli.send(
+        &mut rtsp_types::Request::builder(rtsp_types::Method::Play, rtsp_types::Version::V1_0)
+        .request_uri(join_control(&presentation.base_url, &presentation.control)?)
+        .header(rtsp_types::headers::SESSION, session_id.as_deref().unwrap())
+        .header(rtsp_types::headers::RANGE, "npt=0.000-".to_owned())
+        .build(Bytes::new())).await?;
+    moonfire_rtsp::client::parse_play(play_resp, &mut presentation)?;
+
+    // Read RTP data.
+    let out = tokio::fs::File::create(out).await?;
+    let mp4_vid = Mp4Writer::new(video_metadata.clone(), out).await?;
+    let to_vid = moonfire_rtsp::client::video::h264::VideoAccessUnitHandler::new(video_metadata.clone(), mp4_vid);
+    //let mut print_au = moonfire_rtsp::client::video::h264::PrintAccessUnitHandler::new(&video_metadata)?;
+    let video_stream = &presentation.streams[video_stream_i];
+    let mut h264_timeline = moonfire_rtsp::Timeline::new(video_stream.initial_rtptime.unwrap(), video_stream.clock_rate);
+    let h264 = moonfire_rtsp::client::video::h264::Handler::new(to_vid);
+    let mut h264_rtp = moonfire_rtsp::client::rtp::StrictSequenceChecker::new(
+        video_stream.ssrc.unwrap(),
+        video_stream.initial_seq.unwrap(),
+        h264
+    );
+    let mut h264_rtcp = moonfire_rtsp::client::rtcp::TimestampPrinter::new();
+
+    let timeout = tokio::time::sleep(super::KEEPALIVE_DURATION);
+    tokio::pin!(stop);
+    tokio::pin!(timeout);
+    loop {
+        tokio::select! {
+            msg = cli.next() => {
+                let msg = msg.ok_or_else(|| format_err!("EOF"))??;
+                trace!("msg: {:#?}", &msg);
+                match msg.msg {
+                    rtsp_types::Message::Data(data) => {
+                        match data.channel_id() {
+                            0 => h264_rtp.data(msg.ctx, &mut h264_timeline, data.into_body()).await?,
+                            1 => h264_rtcp.data(msg.ctx, &mut h264_timeline, data.into_body()).await?,
+                            o => bail!("Data message on unexpected channel {} at {:#?}", o, &msg.ctx),
+                        }
+                    },
+                    o => println!("message {:#?}", &o),
+                }
+            },
+            () = &mut timeout => {
+                cli.send_nowait(
+                    &mut rtsp_types::Request::builder(rtsp_types::Method::GetParameter, rtsp_types::Version::V1_0)
+                    .request_uri(presentation.base_url.clone())
+                    .header(rtsp_types::headers::SESSION, session_id.as_deref().unwrap())
+                    .build(Bytes::new())).await?;
+                timeout.as_mut().reset(tokio::time::Instant::now() + super::KEEPALIVE_DURATION);
+            },
+            _ = &mut stop => {
+                break;
+            },
+        }
+    }
+    info!("Stopping");
+    let mp4 = h264_rtp.into_inner().into_inner().into_inner();
+    mp4.finish().await?;
+    Ok(())
 }

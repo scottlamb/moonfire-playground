@@ -6,6 +6,7 @@ use sdp::session_description::SessionDescription;
 use tokio_util::codec::Framed;
 use url::Url;
 
+pub mod application;
 mod parse;
 pub mod rtcp;
 pub mod rtp;

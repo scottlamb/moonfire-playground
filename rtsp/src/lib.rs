@@ -5,7 +5,6 @@ use rtsp_types::Message;
 use std::{convert::TryFrom, fmt::{Debug, Display}};
 
 pub mod client;
-pub mod mp4;
 
 pub static X_ACCEPT_DYNAMIC_RATE: Lazy<rtsp_types::HeaderName> = Lazy::new(
     || rtsp_types::HeaderName::from_static_str("x-Accept-Dynamic-Rate").expect("is ascii")
@@ -36,13 +35,13 @@ pub struct Timeline {
 #[derive(Copy, Clone)]
 pub struct Timestamp {
     /// The full timestamp, with top bits inferred from RTP timestamp wraparounds.
-    timestamp: u64,
+    pub timestamp: u64,
 
     /// The codec-specified clock rate.
-    clock_rate: u32,
+    pub clock_rate: u32,
 
     /// The stream's starting time, as specified in the RTSP `RTP-Info` header.
-    start: u32,
+    pub start: u32,
 }
 
 #[derive(Copy, Clone, PartialEq, PartialOrd, Eq, Ord)]
