@@ -14,11 +14,11 @@ struct Opt {
     #[structopt(long, parse(try_from_str))]
     url: url::Url,
 
-    #[structopt(long, parse(try_from_str))]
-    username: String,
+    #[structopt(long, requires="password")]
+    username: Option<String>,
 
-    #[structopt(long, parse(try_from_str))]
-    password: String,
+    #[structopt(long, requires="username")]
+    password: Option<String>,
 
     #[structopt(long, parse(try_from_str))]
     out: PathBuf,
@@ -67,10 +67,15 @@ async fn main() {
 async fn main_inner() -> Result<(), Error> {
     let opt = Opt::from_args();
     let stop = tokio::signal::ctrl_c();
-    let mut cli = moonfire_rtsp::client::Session::connect(&opt.url, Some(moonfire_rtsp::client::Credentials {
-        username: opt.username,
-        password: opt.password,
-    })).await?;
+    let credentials = match (opt.username, opt.password) {
+        (Some(username), Some(password)) => Some(moonfire_rtsp::client::Credentials {
+            username,
+            password,
+        }),
+        (None, None) => None,
+        _ => unreachable!(),
+    };
+    let mut cli = moonfire_rtsp::client::Session::connect(&opt.url, credentials).await?;
 
     // DESCRIBE. https://tools.ietf.org/html/rfc2326#section-10.2
     let mut presentation = cli.describe(opt.url).await?;
