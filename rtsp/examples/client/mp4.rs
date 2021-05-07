@@ -267,8 +267,8 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> VideoHandler for Mp4Writer<W> {
     }
 
     async fn picture(&mut self, mut picture: moonfire_rtsp::client::video::Picture) -> Result<(), failure::Error> {
-        if let Some(last_pts) = self.last_pts.replace(picture.rtp_timestamp.timestamp) {
-            let duration = picture.rtp_timestamp.timestamp.checked_sub(last_pts).unwrap();
+        if let Some(last_pts) = self.last_pts.replace(picture.rtp_timestamp.timestamp()) {
+            let duration = picture.rtp_timestamp.timestamp().checked_sub(last_pts).unwrap();
             assert!(duration > 0);
             self.durations.push(u32::try_from(duration)?);
             self.tot_duration += duration;

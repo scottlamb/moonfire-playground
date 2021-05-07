@@ -9,7 +9,7 @@ use sdp::session_description::SessionDescription;
 use tokio_util::codec::Framed;
 use url::Url;
 
-use crate::Context;
+use crate::{Context, Timestamp};
 
 pub mod application;
 mod parse;
@@ -17,7 +17,7 @@ pub mod rtcp;
 pub mod rtp;
 pub mod video;
 
-const MAX_TS_JUMP_SECS: u32 = 10;
+const MAX_FORWARD_TIME_JUMP_SECS: u32 = 10;
 
 /// Duration between keepalive RTSP requests during [Playing] state.
 pub const KEEPALIVE_DURATION: std::time::Duration = std::time::Duration::from_secs(30);
@@ -108,46 +108,60 @@ struct StreamStateInit {
     initial_rtptime: Option<u32>,
 }
 
+/// Creates [Timestamp]s (which don't wrap and can be converted to NPT aka normal play time)
+/// from 32-bit (wrapping) RTP timestamps.
 #[derive(Debug)]
-pub struct Timeline {
-    latest: crate::Timestamp,
-    max_jump: u32,
+struct Timeline {
+    latest: Timestamp,
+    max_forward_jump: u32,
 }
 
 impl Timeline {
-    pub fn new(start: u32, clock_rate: u32) -> Self {
-        Timeline {
-            latest: crate::Timestamp {
+    /// Creates a new timeline, erroring on crazy clock rates.
+    fn new(start: u32, clock_rate: u32) -> Result<Self, Error> {
+        if clock_rate == 0 {
+            bail!("clock_rate=0 rejected to prevent division by zero");
+        }
+        let max_forward_jump = MAX_FORWARD_TIME_JUMP_SECS
+            .checked_mul(clock_rate)
+            .ok_or_else(|| format_err!(
+                "clock_rate={} rejected because max forward jump of {} sec exceeds u32::MAX",
+                clock_rate, MAX_FORWARD_TIME_JUMP_SECS))?;
+        Ok(Timeline {
+            latest: Timestamp {
                 timestamp: u64::from(start),
                 start,
                 clock_rate,
             },
-            max_jump: MAX_TS_JUMP_SECS * clock_rate,
-        }
+            max_forward_jump,
+        })
     }
 
-    fn advance(&mut self, rtp_timestamp: u32) -> Result<crate::Timestamp, Error> {
-        // TODO: error on u64 overflow.
-        let ts_high_bits = self.latest.timestamp & 0xFFFF_FFFF_0000_0000;
-        let new_ts = match rtp_timestamp < (self.latest.timestamp as u32) {
-            true  => ts_high_bits + 1u64<<32 + u64::from(rtp_timestamp),
-            false => ts_high_bits + u64::from(rtp_timestamp),
-        };
-        let forward_ts = crate::Timestamp {
-            timestamp: new_ts,
+    /// Advances to the given (wrapping) RTP timestamp, creating a monotonically
+    /// increasing [Timestamp]. Errors on excessive or backward time jumps.
+    fn advance_to(&mut self, rtp_timestamp: u32) -> Result<Timestamp, Error> {
+        let forward_delta = rtp_timestamp.wrapping_sub(self.latest.timestamp as u32);
+        let forward_ts = Timestamp {
+            timestamp: self.latest.timestamp.checked_add(u64::from(forward_delta)).ok_or_else(|| {
+                // This shouldn't happen even with a hostile server. With the
+                // maximum clock rate of u32::MAX / MAX_FORWARD_TIME_JUMP_SECS
+                // and start of u32::MAX, it'd take
+                // (2^32 - 1) * MAX_FORWARD_TIME_JUMP_SECS + 1 packets to
+                // advance the time this far. (~43 billion pkts at jump=10 sec)
+                format_err!("timestamp {} + {} will exceed u64::MAX!",
+                            self.latest.timestamp, forward_delta)
+            })?,
             clock_rate: self.latest.clock_rate,
             start: self.latest.start,
         };
-        let forward_delta = forward_ts.timestamp - self.latest.timestamp;
-        if forward_delta > u64::from(self.max_jump) {
-            let backward_ts = crate::Timestamp {
-                timestamp: ts_high_bits + (self.latest.timestamp & 0xFFFF_FFFF) - u64::from(rtp_timestamp),
-                clock_rate: self.latest.clock_rate,
-                start: self.latest.start,
-            };
-            bail!("Timestamp jumped (forward by {} from {} to {}, more than allowed {} sec OR backward by {} from {} to {})",
-                  forward_delta, self.latest.timestamp, new_ts, MAX_TS_JUMP_SECS,
-                  self.latest.timestamp - backward_ts.timestamp, self.latest.timestamp, backward_ts);
+        if forward_delta > self.max_forward_jump {
+            let f64_clock_rate = f64::from(self.latest.clock_rate);
+            let backward_delta = (self.latest.timestamp as u32).wrapping_sub(rtp_timestamp);
+            bail!("Timestamp jumped:\n\
+                   * forward by {} ({:.03} sec) from {} to {}, more than allowed {} sec OR\n\
+                   * backward by {} ({:.03} sec), more than allowed 0 sec",
+                  forward_delta, (forward_delta as f64) / f64_clock_rate, self.latest.timestamp, forward_ts, MAX_FORWARD_TIME_JUMP_SECS,
+                backward_delta, (backward_delta as f64) / f64_clock_rate);
         }
         self.latest = forward_ts;
         Ok(self.latest)
@@ -337,15 +351,16 @@ impl RtspConnection {
         let host = url.host_str().ok_or_else(|| format_err!("Must specify host in rtsp url {}", &url))?;
         let port = url.port().unwrap_or(554);
         let stream = tokio::net::TcpStream::connect((host, port)).await?;
-        let established = std::time::SystemTime::now();
-        let local_addr = stream.local_addr()?;
-        let peer_addr = stream.peer_addr()?;
+        let conn_established = time::get_time();
+        let conn_local_addr = stream.local_addr()?;
+        let conn_peer_addr = stream.peer_addr()?;
         let stream = Framed::new(stream, crate::Codec {
             ctx: crate::Context {
-                established,
-                local_addr,
-                peer_addr,
-                rtsp_message_offset: 0,
+                conn_established,
+                conn_local_addr,
+                conn_peer_addr,
+                msg_pos: 0,
+                msg_received: conn_established,
             },
         });
         Ok(Self {
@@ -504,7 +519,7 @@ impl Session<Described> {
                     initial_seq: Some(initial_seq),
                  }) => {
                     s.state = StreamState::Playing {
-                        timeline: Timeline::new(initial_rtptime, s.clock_rate),
+                        timeline: Timeline::new(initial_rtptime, s.clock_rate)?,
                         rtp_handler: rtp::StrictSequenceChecker::new(ssrc, initial_seq),
                         rtcp_handler: rtcp::TimestampPrinter::new(),
                     };
@@ -644,6 +659,8 @@ impl Session<Playing> {
 mod tests {
     use crate::client::{ChannelMapping, ChannelType};
 
+    use super::Timeline;
+
     #[test]
     fn channel_mappings() {
         let mut mappings = super::ChannelMappings::default();
@@ -672,5 +689,29 @@ mod tests {
             channel_type: ChannelType::Rtcp,
         }));
         assert_eq!(mappings.next_unassigned().unwrap(), 2);
+    }
+
+    #[test]
+    fn timeline() {
+        // Don't allow crazy clock rates that will get us into trouble.
+        Timeline::new(0, 0).unwrap_err();
+        Timeline::new(0, u32::MAX).unwrap_err();
+
+        // Don't allow excessive forward jumps.
+        let mut t = Timeline::new(100, 90_000).unwrap();
+        t.advance_to(100 + (super::MAX_FORWARD_TIME_JUMP_SECS * 90_000) + 1).unwrap();
+
+        // Or any backward jump.
+        let mut t = Timeline::new(100, 90_000).unwrap();
+        t.advance_to(99).unwrap_err();
+
+        // Normal usage.
+        let mut t = Timeline::new(42, 90_000).unwrap();
+        assert_eq!(t.advance_to(83).unwrap().elapsed(), 83 - 42);
+        assert_eq!(t.advance_to(453).unwrap().elapsed(), 453 - 42);
+
+        // Wraparound is normal too.
+        let mut t = Timeline::new(u32::MAX, 90_000).unwrap();
+        assert_eq!(t.advance_to(5).unwrap().elapsed(), 5 + 1);
     }
 }

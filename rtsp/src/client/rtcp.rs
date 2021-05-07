@@ -4,18 +4,18 @@ use log::{debug, info, trace};
 use rtcp::packet::Packet;
 
 #[derive(Debug)]
-pub(crate) struct TimestampPrinter {
+pub(super) struct TimestampPrinter {
     prev_sr: Option<rtcp::sender_report::SenderReport>,
 }
 
 impl TimestampPrinter {
-    pub(crate) fn new() -> Self {
+    pub(super) fn new() -> Self {
         TimestampPrinter {
             prev_sr: None,
         }
     }
 
-    pub(crate) fn data(&mut self, rtsp_ctx: crate::Context, timeline: &mut super::Timeline,
+    pub(super) fn data(&mut self, rtsp_ctx: crate::Context, timeline: &mut super::Timeline,
                        mut data: Bytes) -> Result<(), Error> {
         while !data.is_empty() {
             let h = match rtcp::header::Header::unmarshal(&data) {
@@ -33,7 +33,7 @@ impl TimestampPrinter {
                     Ok(p) => p,
                 };
 
-                let timestamp = match timeline.advance(pkt.rtp_time) {
+                let timestamp = match timeline.advance_to(pkt.rtp_time) {
                     Ok(ts) => ts,
                     Err(e) => return Err(e.context(format!("bad RTP timestamp in RTCP SR {:#?} at {:#?}", &pkt, &rtsp_ctx)).into()),
                 };

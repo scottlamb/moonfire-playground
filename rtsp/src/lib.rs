@@ -19,7 +19,7 @@ pub struct ReceivedMessage {
     pub msg: Message<Bytes>,
 }
 
-/// A RTP/RTSP timestamp.
+/// A monotonically increasing timestamp within an RTP stream.
 /// The [Display] and [Debug] implementations display:
 /// *   the bottom 32 bits, as seen in RTP packet headers. This advances at a
 ///     codec-specified clock rate.
@@ -27,16 +27,67 @@ pub struct ReceivedMessage {
 /// *   a conversion to RTSP "normal play time" (NPT): zero-based and normalized to seconds.
 #[derive(Copy, Clone)]
 pub struct Timestamp {
-    /// The full timestamp, with top bits inferred from RTP timestamp wraparounds.
-    pub timestamp: u64,
+    /// A timestamp which must be compared to `start`. The top bits are inferred
+    /// from wraparounds of 32-bit RTP timestamps. The `u64` itself is expected
+    /// to never wrap.
+    timestamp: u64,
 
-    /// The codec-specified clock rate.
-    pub clock_rate: u32,
+    /// The codec-specified clock rate, in Hz. Must be non-zero.
+    clock_rate: u32,
 
     /// The stream's starting time, as specified in the RTSP `RTP-Info` header.
-    pub start: u32,
+    start: u32,
 }
 
+impl Timestamp {
+    /// Returns time since some arbitrary point before the stream started.
+    #[inline]
+    pub fn timestamp(&self) -> u64 {
+        self.timestamp
+    }
+
+    /// Returns timestamp of the start of the stream.
+    #[inline]
+    pub fn start(&self) -> u32 {
+        self.start
+    }
+
+    /// Returns codec-specified clock rate, in Hz. Must be non-zero.
+    #[inline]
+    pub fn clock_rate(&self) -> u32 {
+        self.clock_rate
+    }
+
+    /// Returns elapsed time since the stream start in clock rate units.
+    #[inline]
+    pub fn elapsed(&self) -> u64 {
+        self.timestamp - u64::from(self.start)
+    }
+
+    /// Returns elapsed time since the stream start in seconds, aka "normal play
+    /// time" (NPT).
+    #[inline]
+    pub fn elapsed_secs(&self) -> f64 {
+        (self.elapsed() as f64) / (self.clock_rate as f64)
+    }
+}
+
+impl Display for Timestamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (mod-2^32: {}), npt {:.03}",
+               self.timestamp, self.timestamp as u32, self.elapsed_secs())
+    }
+}
+
+impl Debug for Timestamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(self, f)
+    }
+}
+
+/// A wallclock time represented using the format of the Network Time Protocol.
+/// This isn't necessarily gathered from a real NTP server. Reported NTP
+/// timestamps are allowed to jump backwards and/or be complete nonsense.
 #[derive(Copy, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct NtpTimestamp(u64);
 
@@ -68,27 +119,36 @@ impl std::fmt::Debug for NtpTimestamp {
     }
 }
 
-impl Display for Timestamp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} (mod-2^32: {}), npt {:.03}",
-               self.timestamp, self.timestamp as u32, ((self.timestamp - u64::from(self.start)) as f64) / (self.clock_rate as f64))
-    }
-}
-
-impl Debug for Timestamp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(self, f)
-    }
-}
-
-#[derive(Copy, Clone, Debug)]
+/// Context of a received message within an RTSP stream.
+/// This is meant to help find the correct TCP stream and packet in a matching
+/// packet capture.
+#[derive(Copy, Clone)]
 pub struct Context {
-    pub local_addr: std::net::SocketAddr,
-    pub peer_addr: std::net::SocketAddr,
-    pub established: std::time::SystemTime,
+    conn_local_addr: std::net::SocketAddr,
+    conn_peer_addr: std::net::SocketAddr,
+    conn_established: time::Timespec,
 
-    /// The byte position within the input stream. The bottom 32 bits can be compared to the TCP sequence number.
-    pub rtsp_message_offset: u64,
+    /// The byte position within the input stream. The bottom 32 bits can be
+    /// compared to the TCP sequence number.
+    msg_pos: u64,
+
+    /// Time when the application parsed the message. Caveat: this may not
+    /// closely match the time on a packet capture if the application is
+    /// overloaded (or `CLOCK_REALTIME` jumps).
+    msg_received: time::Timespec,
+}
+
+impl Debug for Context {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // TODO: this current hardcodes the assumption we are the client.
+        // Change if/when adding server code.
+        write!(f, "[{}(me)->{}@{} pos={}@{}]",
+               &self.conn_local_addr,
+               &self.conn_peer_addr,
+               time::at(self.conn_established).strftime("%FT%T").or_else(|_| Err(std::fmt::Error))?,
+               self.msg_pos,
+               time::at(self.msg_received).strftime("%FT%T").or_else(|_| Err(std::fmt::Error))?)
+    }
 }
 
 struct Codec {
@@ -172,11 +232,12 @@ impl tokio_util::codec::Decoder for Codec {
                 }
             },
         };
+        self.ctx.msg_received = time::get_time();
         let msg = ReceivedMessage {
             ctx: self.ctx,
             msg,
         };
-        self.ctx.rtsp_message_offset += u64::try_from(len).expect("usize fits in u64");
+        self.ctx.msg_pos += u64::try_from(len).expect("usize fits in u64");
         Ok(Some(msg))
     }
 }

@@ -3,8 +3,7 @@
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use failure::{Error, bail, format_err};
-use log::{debug, trace};
-use pretty_hex::PrettyHex;
+use log::trace;
 
 #[derive(Debug)]
 pub enum Message {
@@ -76,14 +75,14 @@ const MAX_INITIAL_SEQ_SKIP: u16 = 128;
 /// can change mid-session with a RTCP BYE message. This currently isn't handled. I'm
 /// not sure it will ever come up with IP cameras.
 #[derive(Debug)]
-pub(crate) struct StrictSequenceChecker {
+pub(super) struct StrictSequenceChecker {
     ssrc: u32,
     next_seq: u16,
     max_seq_skip: u16,
 }
 
 impl StrictSequenceChecker {
-    pub(crate) fn new(ssrc: u32, next_seq: u16) -> Self {
+    pub(super) fn new(ssrc: u32, next_seq: u16) -> Self {
         Self {
             ssrc,
             next_seq,
@@ -91,14 +90,16 @@ impl StrictSequenceChecker {
         }
     }
 
-    pub(crate) fn process(&mut self, rtsp_ctx: crate::Context, timeline: &mut super::Timeline,
+    pub(super) fn process(&mut self, rtsp_ctx: crate::Context, timeline: &mut super::Timeline,
                           stream_id: usize, mut data: Bytes) -> Result<Packet, Error> {
         let reader = rtp_rs::RtpReader::new(&data[..])
-            .map_err(|e| format_err!("corrupt RTP header while expecting seq={:04x} at {:#?}: {:?}", self.next_seq, &rtsp_ctx, e))?;
-        let sequence_number = u16::from_be_bytes([data[2], data[3]]);
-        let timestamp = match timeline.advance(reader.timestamp()) {
+            .map_err(|e| format_err!("corrupt RTP header while expecting seq={:04x} at {:#?}: {:?}",
+                                     self.next_seq, &rtsp_ctx, e))?;
+        let sequence_number = u16::from_be_bytes([data[2], data[3]]); // I don't like rtsp_rs::Seq.
+        let timestamp = match timeline.advance_to(reader.timestamp()) {
             Ok(ts) => ts,
-            Err(e) => return Err(e.context(format!("timestamp error in seq={:04x} {:#?}", sequence_number, &rtsp_ctx)).into()),
+            Err(e) => return Err(e.context(format!("timestamp error in seq={:04x} {:#?}",
+                                                   sequence_number, &rtsp_ctx)).into()),
         };
         let ssrc = reader.ssrc();
         if ssrc != self.ssrc
@@ -107,10 +108,10 @@ impl StrictSequenceChecker {
                   self.ssrc, self.next_seq, ssrc, sequence_number, timestamp, &rtsp_ctx);
         }
         let mark = reader.mark();
-        debug!("pkt{} seq={:04x} ts={}", if mark { "   " } else { "(M)"}, self.next_seq, &timestamp);
-        trace!("{:?}", data.hex_dump());
         let payload_range = crate::as_range(&data, reader.payload())
-            .ok_or_else(|| format_err!("empty paylaod"))?;
+            .ok_or_else(|| format_err!("empty payload at {:#?}", &rtsp_ctx))?;
+        trace!("{:?} pkt {:04x}{} ts={} len={}", &rtsp_ctx, sequence_number,
+               if mark { "   " } else { "(M)"}, &timestamp, payload_range.len());
         data.truncate(payload_range.end);
         data.advance(payload_range.start);
         self.next_seq = sequence_number.wrapping_add(1);
