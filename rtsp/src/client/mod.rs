@@ -234,7 +234,7 @@ impl Debug for ChannelMappings {
         f.debug_map()
             .entries(self.0.iter().enumerate().filter_map(|(i, v)| v.map(|v| (
                 format!("{}-{}", i << 1, (i << 1) + 1),
-                v
+                v.get() - 1
             ))))
             .finish()
     }
