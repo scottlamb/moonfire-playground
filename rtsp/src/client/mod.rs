@@ -175,23 +175,21 @@ pub struct ChannelMapping {
 ///     assigns only `n` and `m`; section 12.39 the suggests full range `[n,
 ///     m]`) or when `n==m`. We'll get into trouble if an RTSP server insists on
 ///     specifying an odd `n`, but that just seems obstinate.
-/// These assumptions let us do the full mapping in 128 bytes with a trivial
-/// lookup.
-#[repr(transparent)]
-#[derive(Copy, Clone)]
-struct ChannelMappings([Option<NonZeroU8>; 128]);
+/// These assumptions let us keep the full mapping with little space and an
+/// efficient lookup operation.
+#[derive(Default)]
+struct ChannelMappings(smallvec::SmallVec<[Option<NonZeroU8>; 16]>);
 
 impl ChannelMappings {
-    /// Creates an empty mapping.
-    fn new() -> Self {
-        Self([None; 128])
-    }
-
     /// Returns the next unassigned even channel id, or errors.
     fn next_unassigned(&self) -> Result<u8, Error> {
-        self.0.iter().position(|c| c.is_none())
-            .map(|c| (c as u8) << 1)
-            .ok_or_else(|| format_err!("all RTSP channels have been assigned"))
+        if let Some(i) = self.0.iter().position(Option::is_none) {
+            return Ok((i as u8) << 1);
+        }
+        if self.0.len() < 128 {
+            return Ok((self.0.len() as u8) << 1);
+        }
+        bail!("all RTSP channels have been assigned");
     }
 
     /// Assigns an even channel id (to RTP) and its odd successor (to RTCP) or errors.
@@ -202,7 +200,11 @@ impl ChannelMappings {
         if stream_i >= 255 {
             bail!("Can't assign channel to stream id {} because it's >= 255", stream_i);
         }
-        let c = &mut self.0[usize::from(channel_id >> 1)];
+        let i = usize::from(channel_id >> 1);
+        if i >= self.0.len() {
+            self.0.resize(i + 1, None);
+        }
+        let c = &mut self.0[i];
         if let Some(c) = c {
             bail!("Channel id {} is already assigned to stream {}; won't reassign to stream {}",
                   channel_id, c.get() - 1, channel_id);
@@ -213,7 +215,11 @@ impl ChannelMappings {
 
     /// Looks up a channel id's mapping.
     fn lookup(&self, channel_id: u8) -> Option<ChannelMapping> {
-        self.0[usize::from(channel_id >> 1)].map(|c| ChannelMapping {
+        let i = usize::from(channel_id >> 1);
+        if i >= self.0.len() {
+            return None;
+        }
+        self.0[i].map(|c| ChannelMapping {
             stream_i: usize::from(c.get() - 1),
             channel_type: match (channel_id & 1) != 0 {
                 false => ChannelType::Rtp,
@@ -403,7 +409,7 @@ impl Session<Described> {
             state: Described {
                 presentation,
                 session_id: None,
-                channels: ChannelMappings::new(),
+                channels: ChannelMappings::default(),
             },
         })
     }
@@ -494,7 +500,7 @@ mod tests {
 
     #[test]
     fn channel_mappings() {
-        let mut mappings = super::ChannelMappings::new();
+        let mut mappings = super::ChannelMappings::default();
         assert_eq!(mappings.next_unassigned().unwrap(), 0);
         assert_eq!(mappings.lookup(0), None);
         mappings.assign(0, 42).unwrap();

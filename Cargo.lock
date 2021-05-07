@@ -1076,6 +1076,7 @@ dependencies = [
  "rtp-rs",
  "rtsp-types",
  "sdp",
+ "smallvec",
  "structopt",
  "time",
  "tokio",
