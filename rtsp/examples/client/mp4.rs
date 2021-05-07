@@ -13,9 +13,9 @@
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, BytesMut};
 use failure::{Error, bail, format_err};
-use log::{info, trace};
-use moonfire_rtsp::client::{ChannelType, video::{Metadata, VideoHandler, h264}};
-use moonfire_rtsp::client::ChannelHandler;
+use log::info;
+use moonfire_rtsp::client::{rtp::PacketHandler, video::{Metadata, VideoHandler, h264}};
+
 use std::convert::TryFrom;
 use std::io::SeekFrom;
 use std::path::PathBuf;
@@ -300,50 +300,22 @@ pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credential
     let video_metadata = session.streams()[video_stream_i].metadata.as_ref().unwrap().clone();
     info!("video metadata: {:#?}", &video_metadata);
     session.setup(video_stream_i).await?;
-    let mut session = session.play().await?;
+    let session = session.play().await?;
 
     // Read RTP data.
     let out = tokio::fs::File::create(out).await?;
     let mp4_vid = Mp4Writer::new(video_metadata.clone(), out).await?;
     let to_vid = moonfire_rtsp::client::video::h264::VideoAccessUnitHandler::new(video_metadata.clone(), mp4_vid);
     //let mut print_au = moonfire_rtsp::client::video::h264::PrintAccessUnitHandler::new(&video_metadata)?;
-    let video_stream = &session.streams()[video_stream_i];
-    let mut h264_timeline = moonfire_rtsp::client::Timeline::new(video_stream.initial_rtptime.unwrap(), video_stream.clock_rate);
-    let h264 = moonfire_rtsp::client::video::h264::Handler::new(to_vid);
-    let mut h264_rtp = moonfire_rtsp::client::rtp::StrictSequenceChecker::new(
-        video_stream.ssrc.unwrap(),
-        video_stream.initial_seq.unwrap(),
-        h264
-    );
-    let mut h264_rtcp = moonfire_rtsp::client::rtcp::TimestampPrinter::new();
+    let mut h264 = moonfire_rtsp::client::video::h264::Handler::new(to_vid);
 
-    let timeout = tokio::time::sleep(super::KEEPALIVE_DURATION);
+    tokio::pin!(session);
     tokio::pin!(stop);
-    tokio::pin!(timeout);
     loop {
         tokio::select! {
-            msg = session.next() => {
-                let msg = msg.ok_or_else(|| format_err!("EOF"))??;
-                trace!("msg: {:#?}", &msg);
-                match msg.msg {
-                    rtsp_types::Message::Data(data) => {
-                        let c = data.channel_id();
-                        let mapping = match session.channel(c) {
-                            Some(m) => m,
-                            None => bail!("Data message on unexpected channel {} at {:#?}",
-                                          c, &msg.ctx),
-                        };
-                        match mapping.channel_type {
-                            ChannelType::Rtp => h264_rtp.data(msg.ctx, &mut h264_timeline, data.into_body()).await?,
-                            ChannelType::Rtcp => h264_rtcp.data(msg.ctx, &mut h264_timeline, data.into_body()).await?,
-                        };
-                    },
-                    o => println!("message {:#?}", &o),
-                }
-            },
-            () = &mut timeout => {
-                session.send_keepalive().await?;
-                timeout.as_mut().reset(tokio::time::Instant::now() + super::KEEPALIVE_DURATION);
+            pkt = session.as_mut().next() => {
+                let pkt = pkt.ok_or_else(|| format_err!("EOF"))??;
+                h264.pkt(pkt).await?;
             },
             _ = &mut stop => {
                 break;
@@ -351,7 +323,7 @@ pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credential
         }
     }
     info!("Stopping");
-    let mp4 = h264_rtp.into_inner().into_inner().into_inner();
+    let mp4 = h264.into_inner().into_inner();
     mp4.finish().await?;
     Ok(())
 }

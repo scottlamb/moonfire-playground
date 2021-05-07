@@ -1,13 +1,15 @@
-use std::{fmt::Debug, num::NonZeroU8};
+use std::{fmt::Debug, num::NonZeroU8, pin::Pin};
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use failure::{Error, bail, format_err};
 use futures::{SinkExt, StreamExt};
-use log::{debug, trace};
+use log::{debug, trace, warn};
+use pin_project::pin_project;
 use sdp::session_description::SessionDescription;
 use tokio_util::codec::Framed;
 use url::Url;
+
+use crate::Context;
 
 pub mod application;
 mod parse;
@@ -17,12 +19,8 @@ pub mod video;
 
 const MAX_TS_JUMP_SECS: u32 = 10;
 
-/// Handles data from a RTSP data channel.
-#[async_trait]
-pub trait ChannelHandler {
-    async fn data(&mut self, ctx: crate::Context, timeline: &mut Timeline, data: Bytes) -> Result<(), Error>;
-    async fn end(&mut self) -> Result<(), Error>;
-}
+/// Duration between keepalive RTSP requests during [Playing] state.
+pub const KEEPALIVE_DURATION: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug)]
 pub struct Presentation {
@@ -71,19 +69,6 @@ pub struct Stream {
     /// response's `RTP-Info` header.
     pub control: String,
 
-    /// The RTP synchronization source (SSRC), as defined in
-    /// [RFC 3550](https://tools.ietf.org/html/rfc3550). This is normally
-    /// supplied in the `SETUP` response's `Transport` header. Reolink cameras
-    /// instead supply it in the `PLAY` response's `RTP-Info` header.
-    pub ssrc: Option<u32>,
-
-    /// The initial RTP sequence number, as specified in the `PLAY` response's
-    /// `RTP-Info` header.
-    pub initial_seq: Option<u16>,
-
-    /// The initial RTP timestamp, as specified in the `PLAY` response's
-    /// `RTP-Info` header.
-    pub initial_rtptime: Option<u32>,
 
     state: StreamState,
 }
@@ -94,7 +79,33 @@ enum StreamState {
     Uninit,
 
     /// `SETUP` reply has been received.
-    Init,
+    Init(StreamStateInit),
+
+    /// `PLAY` reply has been received.
+    Playing {
+        timeline: Timeline,
+        rtp_handler: rtp::StrictSequenceChecker,
+        rtcp_handler: rtcp::TimestampPrinter,
+    }
+}
+
+#[derive(Copy, Clone, Debug, Default)]
+struct StreamStateInit {
+    /// The RTP synchronization source (SSRC), as defined in
+    /// [RFC 3550](https://tools.ietf.org/html/rfc3550). This is normally
+    /// supplied in the `SETUP` response's `Transport` header. Reolink cameras
+    /// instead supply it in the `PLAY` response's `RTP-Info` header.
+    ssrc: Option<u32>,
+
+    /// The initial RTP sequence number, as specified in the `PLAY` response's
+    /// `RTP-Info` header. This field is only used during the `play()` call
+    /// itself; by the time it returns, the stream will be in state `Playing`.
+    initial_seq: Option<u16>,
+
+    /// The initial RTP timestamp, as specified in the `PLAY` response's
+    /// `RTP-Info` header. This field is only used during the `play()` call
+    /// itself; by the time it returns, the stream will be in state `Playing`.
+    initial_rtptime: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -260,10 +271,15 @@ pub struct Described {
 impl State for Described {}
 
 /// State after a `PLAY`.
+#[pin_project(project = PlayingProj)]
 pub struct Playing {
     presentation: Presentation,
     session_id: String,
     channels: ChannelMappings,
+    pending_keepalive_cseq: Option<u32>,
+
+    #[pin]
+    keepalive_timer: tokio::time::Sleep,
 }
 impl State for Playing {}
 
@@ -280,8 +296,11 @@ struct RtspConnection {
 
 /// An RTSP session, or a connection that may be used in a proscriptive way.
 /// See discussion at [State].
+#[pin_project]
 pub struct Session<S: State> {
     conn: RtspConnection,
+
+    #[pin]
     state: S,
 }
 
@@ -348,7 +367,7 @@ impl RtspConnection {
                 rtsp_types::Message::Response(r) => r,
                 o => bail!("Unexpected RTSP message {:?}", &o),
             };
-            if !matches!(resp.header(&rtsp_types::headers::CSEQ), Some(v) if v.as_str() == &cseq[..]) {
+            if parse::get_cseq(&resp) != Some(cseq) {
                 bail!("didn't get expected CSeq {:?} on {:?} at {:#?}", &cseq, &resp, &msg.ctx);
             }
             if resp.status() == rtsp_types::StatusCode::Unauthorized {
@@ -374,8 +393,8 @@ impl RtspConnection {
     }
 
     /// Sends a request without waiting for a response, returning the `CSeq` as a string.
-    async fn send_nowait(&mut self, req: &mut rtsp_types::Request<Bytes>) -> Result<String, Error> {
-        let cseq = self.next_cseq.to_string();
+    async fn send_nowait(&mut self, req: &mut rtsp_types::Request<Bytes>) -> Result<u32, Error> {
+        let cseq = self.next_cseq;
         self.next_cseq += 1;
         match (self.requested_auth.as_mut(), self.creds.as_ref()) {
             (None, _) => {},
@@ -388,7 +407,7 @@ impl RtspConnection {
             },
             (Some(_), None) => bail!("Authentication required; no credentials supplied"),
         }
-        req.insert_header(rtsp_types::headers::CSEQ, cseq.clone());
+        req.insert_header(rtsp_types::headers::CSEQ, cseq.to_string());
         req.insert_header(rtsp_types::headers::USER_AGENT, self.user_agent.clone());
         self.stream.send(rtsp_types::Message::Request(req.clone())).await?;
         Ok(cseq)
@@ -443,13 +462,25 @@ impl Session<Described> {
             .header(crate::X_DYNAMIC_RATE.clone(), "1".to_owned())
             .build(Bytes::new())).await?;
         debug!("SETUP response: {:#?}", &response);
-        let channel_id = parse::parse_setup(response, &mut self.state.session_id, stream)?;
-        self.state.channels.assign(channel_id, stream_i)?;
-        stream.state = StreamState::Init;
+        let response = parse::parse_setup(&response)?;
+        match self.state.session_id.as_ref() {
+            Some(old) if old != response.session_id => {
+                bail!("SETUP response changed session id from {:?} to {:?}",
+                    old, response.session_id);
+            },
+            Some(_) => {},
+            None => self.state.session_id = Some(response.session_id.to_owned()),
+        };
+        self.state.channels.assign(response.channel_id, stream_i)?;
+        stream.state = StreamState::Init(StreamStateInit {
+            ssrc: response.ssrc,
+            initial_seq: None,
+            initial_rtptime: None,
+        });
         Ok(())
     }
 
-    /// Sends a `PLAY` request for the presentation.
+    /// Sends a `PLAY` request for the entire presentation.
     /// The presentation must support aggregate control, as defined in [RFC 2326
     /// section 1.3](https://tools.ietf.org/html/rfc2326#section-1.3).
     pub async fn play(mut self) -> Result<Session<Playing>, Error> {
@@ -462,36 +493,151 @@ impl Session<Described> {
             .header(rtsp_types::headers::RANGE, "npt=0.000-".to_owned())
             .build(Bytes::new())).await?;
         parse::parse_play(response, &mut self.state.presentation)?;
+
+        // Move all streams that have been set up from Init to Playing state. Check that required
+        // parameters are present while doing so.
+        for (i, s) in self.state.presentation.streams.iter_mut().enumerate() {
+            match s.state {
+                StreamState::Init(StreamStateInit {
+                    ssrc: Some(ssrc),
+                    initial_rtptime: Some(initial_rtptime),
+                    initial_seq: Some(initial_seq),
+                 }) => {
+                    s.state = StreamState::Playing {
+                        timeline: Timeline::new(initial_rtptime, s.clock_rate),
+                        rtp_handler: rtp::StrictSequenceChecker::new(ssrc, initial_seq),
+                        rtcp_handler: rtcp::TimestampPrinter::new(),
+                    };
+                },
+                StreamState::Init(init) => bail!(
+                    "Expected all init parameters {:#?} to be specified after PLAY response, \
+                    stream {}/{:#?}",
+                    init, i, s),
+                StreamState::Uninit => {},
+                StreamState::Playing{..} => unreachable!(),
+            };
+        }
         Ok(Session {
             conn: self.conn,
             state: Playing {
                 presentation: self.state.presentation,
                 session_id,
                 channels: self.state.channels,
+                keepalive_timer: tokio::time::sleep(KEEPALIVE_DURATION),
+                pending_keepalive_cseq: None,
             },
         })
     }
 }
 
 impl Session<Playing> {
-    pub async fn next(&mut self) -> Option<Result<crate::ReceivedMessage, Error>> {
-        self.conn.stream.next().await
+    /// Returns the next packet, an error, or `None` on end of stream.
+    /// Also manages keepalives; this will send them as necessary to keep the
+    /// stream open, and failed when sending a following keepalive if the
+    /// previous one was never acknowledged.
+    ///
+    /// TODO: this should also pass along RTCP packets. There can be multiple
+    /// RTCP packets per data message, so that will require keeping more state.
+    pub async fn next(self: Pin<&mut Self>) -> Option<Result<rtp::Packet, Error>> {
+        let this = self.project();
+        let mut state = this.state.project();
+        loop {
+            tokio::select! {
+                // Prefer receiving data to sending keepalives. If we can't keep
+                // up with the server's data stream, it probably should drop us.
+                biased;
+
+                msg = this.conn.stream.next() => {
+                    let msg = match msg {
+                        Some(Ok(m)) => m,
+                        Some(Err(e)) => return Some(Err(e)),
+                        None => return None,
+                    };
+                    match msg.msg {
+                        rtsp_types::Message::Data(data) => {
+                            match Session::handle_data(&mut state, msg.ctx, data) {
+                                Err(e) => return Some(Err(e)),
+                                Ok(Some(pkt)) => return Some(Ok(pkt)),
+                                Ok(None) => continue,
+                            };
+                        },
+                        rtsp_types::Message::Response(response) => {
+                            if let Err(e) = Session::handle_response(&mut state, response) {
+                                return Some(Err(e));
+                            }
+                        },
+                        rtsp_types::Message::Request(request) => {
+                            warn!("Received RTSP request in Playing state. Responding unimplemented.\n{:#?}",
+                                request);
+                        },
+                    }
+                },
+
+                () = &mut state.keepalive_timer => {
+                    if let Err(e) = Session::handle_keepalive_timer(this.conn, &mut state).await {
+                        return Some(Err(e));
+                    }
+                },
+            }
+        }
+    }
+
+    async fn handle_keepalive_timer(conn: &mut RtspConnection, state: &mut PlayingProj<'_>) -> Result<(), Error> {
+        // Check on the previous keepalive request.
+        if let Some(cseq) = state.pending_keepalive_cseq {
+            bail!("Server failed to respond to keepalive {} within {:?}", cseq, KEEPALIVE_DURATION);
+        }
+
+        // Send a new one and reset the timer.
+        *state.pending_keepalive_cseq = Some(conn.send_nowait(
+            &mut rtsp_types::Request::builder(rtsp_types::Method::GetParameter, rtsp_types::Version::V1_0)
+            .request_uri(state.presentation.base_url.clone())
+            .header(rtsp_types::headers::SESSION, state.session_id.clone())
+            .build(Bytes::new())).await?);
+        state.keepalive_timer.as_mut().reset(tokio::time::Instant::now() + KEEPALIVE_DURATION);
+        Ok(())
+    }
+
+    fn handle_response(state: &mut PlayingProj<'_>, response: rtsp_types::Response<Bytes>) -> Result<(), Error> {
+        if matches!(*state.pending_keepalive_cseq,
+                    Some(cseq) if parse::get_cseq(&response) == Some(cseq)) {
+            // We don't care if the keepalive response succeeds or fails. Just mark complete.
+            *state.pending_keepalive_cseq = None;
+            return Ok(())
+        }
+
+        // The only response we expect in this state is to our keepalive request.
+        bail!("Unexpected RTSP response {:#?}", response);
+    }
+
+    fn handle_data(state: &mut PlayingProj<'_>, ctx: Context, data: rtsp_types::Data<Bytes>)
+                   -> Result<Option<rtp::Packet>, Error> {
+        let c = data.channel_id();
+        let m = match state.channels.lookup(c) {
+            Some(m) => m,
+            None => bail!("Data message on unexpected channel {} at {:#?}", c, &ctx),
+        };
+        let stream = &mut state.presentation.streams[m.stream_i];
+        let (mut timeline, rtp_handler, rtcp_handler) = match &mut stream.state {
+            StreamState::Playing{timeline, rtp_handler, rtcp_handler} => {
+                (timeline, rtp_handler, rtcp_handler)
+            },
+            _ => unreachable!("Session<Playing>'s {}->{:?} not in Playing state", c, m),
+        };
+        match m.channel_type {
+            ChannelType::Rtp => Ok(Some(
+                rtp_handler.process(ctx, &mut timeline, m.stream_i, data.into_body())?)),
+            ChannelType::Rtcp => {
+                // TODO: pass RTCP packets along. Currenly this just logs them.
+                // There can be multiple packets per data message, so we'll need to
+                // keep Stream state.
+                rtcp_handler.data(ctx, &mut timeline, data.into_body())?;
+                Ok(None)
+            },
+        }
     }
 
     pub fn streams(&self) -> &[Stream] { &self.state.presentation.streams }
-
-    pub fn channel(&self, channel_id: u8) -> Option<ChannelMapping> {
-        self.state.channels.lookup(channel_id)
-    }
-
-    pub async fn send_keepalive(&mut self) -> Result<(), Error> {
-        self.conn.send_nowait(
-            &mut rtsp_types::Request::builder(rtsp_types::Method::GetParameter, rtsp_types::Version::V1_0)
-            .request_uri(self.state.presentation.base_url.clone())
-            .header(rtsp_types::headers::SESSION, self.state.session_id.clone())
-            .build(Bytes::new())).await?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]

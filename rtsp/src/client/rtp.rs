@@ -6,33 +6,34 @@ use failure::{Error, bail, format_err};
 use log::{debug, trace};
 use pretty_hex::PrettyHex;
 
-/*#[derive(Debug)]
+#[derive(Debug)]
 pub enum Message {
     /// An RTP packet.
     Packet(Packet),
 
     /// An RTCP sender report.
     SenderReport(SenderReport),
-}*/
+}
 
 /// An RTP packet.
 #[derive(Debug)]
 pub struct Packet {
     pub rtsp_ctx: crate::Context,
+    pub stream_id: usize,
     pub timestamp: crate::Timestamp,
     pub sequence_number: u16,
     pub mark: bool,
     pub payload: Bytes,
 }
 
-/*/// An RTCP sender report.
+/// An RTCP sender report.
 #[derive(Debug)]
 pub struct SenderReport {
     pub stream_id: usize,
     pub rtsp_ctx: crate::Context,
     pub timestamp: crate::Timestamp,
     pub ntp_timestamp: crate::NtpTimestamp,
-}*/
+}
 
 #[async_trait]
 pub trait PacketHandler {
@@ -74,31 +75,24 @@ const MAX_INITIAL_SEQ_SKIP: u16 = 128;
 /// [RFC 3550 section 8.2](https://tools.ietf.org/html/rfc3550#section-8.2) says that SSRC
 /// can change mid-session with a RTCP BYE message. This currently isn't handled. I'm
 /// not sure it will ever come up with IP cameras.
-pub struct StrictSequenceChecker<P: PacketHandler> {
+#[derive(Debug)]
+pub(crate) struct StrictSequenceChecker {
     ssrc: u32,
     next_seq: u16,
-    inner: P,
     max_seq_skip: u16,
 }
 
-impl<P: PacketHandler> StrictSequenceChecker<P> {
-    pub fn new(ssrc: u32, next_seq: u16, inner: P) -> Self {
+impl StrictSequenceChecker {
+    pub(crate) fn new(ssrc: u32, next_seq: u16) -> Self {
         Self {
             ssrc,
             next_seq,
-            inner,
             max_seq_skip: MAX_INITIAL_SEQ_SKIP,
         }
     }
 
-    pub fn into_inner(self) -> P {
-        self.inner
-    }
-}
-
-#[async_trait]
-impl<P: PacketHandler + Send> super::ChannelHandler for StrictSequenceChecker<P> {
-    async fn data(&mut self, rtsp_ctx: crate::Context, timeline: &mut super::Timeline, mut data: Bytes) -> Result<(), Error> {
+    pub(crate) fn process(&mut self, rtsp_ctx: crate::Context, timeline: &mut super::Timeline,
+                          stream_id: usize, mut data: Bytes) -> Result<Packet, Error> {
         let reader = rtp_rs::RtpReader::new(&data[..])
             .map_err(|e| format_err!("corrupt RTP header while expecting seq={:04x} at {:#?}: {:?}", self.next_seq, &rtsp_ctx, e))?;
         let sequence_number = u16::from_be_bytes([data[2], data[3]]);
@@ -121,16 +115,13 @@ impl<P: PacketHandler + Send> super::ChannelHandler for StrictSequenceChecker<P>
         data.advance(payload_range.start);
         self.next_seq = sequence_number.wrapping_add(1);
         self.max_seq_skip = 0;
-        self.inner.pkt(Packet {
+        return Ok(Packet {
+            stream_id,
             rtsp_ctx,
             timestamp,
             sequence_number,
             mark,
             payload: data,
-        }).await
-    }
-
-    async fn end(&mut self) -> Result<(), Error> {
-        self.inner.end().await
+        })
     }
 }

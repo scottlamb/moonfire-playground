@@ -1,24 +1,22 @@
-use async_trait::async_trait;
 use bytes::Bytes;
 use failure::{Error, bail};
 use log::{debug, info, trace};
 use rtcp::packet::Packet;
 
-pub struct TimestampPrinter {
+#[derive(Debug)]
+pub(crate) struct TimestampPrinter {
     prev_sr: Option<rtcp::sender_report::SenderReport>,
 }
 
 impl TimestampPrinter {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         TimestampPrinter {
             prev_sr: None,
         }
     }
-}
 
-#[async_trait]
-impl super::ChannelHandler for TimestampPrinter {
-    async fn data(&mut self, rtsp_ctx: crate::Context, timeline: &mut super::Timeline, mut data: Bytes) -> Result<(), Error> {
+    pub(crate) fn data(&mut self, rtsp_ctx: crate::Context, timeline: &mut super::Timeline,
+                       mut data: Bytes) -> Result<(), Error> {
         while !data.is_empty() {
             let h = match rtcp::header::Header::unmarshal(&data) {
                 Err(e) => bail!("corrupt RTCP header at {:#?}: {}", &rtsp_ctx, e),
@@ -48,10 +46,6 @@ impl super::ChannelHandler for TimestampPrinter {
                 debug!("rtcp: {:?}", h.packet_type);
             }
         }
-        Ok(())
-    }
-
-    async fn end(&mut self) -> Result<(), Error> {
         Ok(())
     }
 }

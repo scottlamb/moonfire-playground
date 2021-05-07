@@ -1,12 +1,13 @@
 use bytes::{Buf, Bytes};
 use failure::{Error, ResultExt, bail, format_err};
+use log::debug;
 use sdp::media_description::MediaDescription;
 use url::Url;
 use std::convert::TryFrom;
 
 use super::{Presentation, Stream};
 
-pub fn join_control(base_url: &Url, control: &str) -> Result<Url, Error> {
+pub(crate) fn join_control(base_url: &Url, control: &str) -> Result<Url, Error> {
     //let control_value = control_value.ok_or_else(|| format_err!("control attribute has no value"))?;
     if control == "*" {
         return Ok(base_url.clone());
@@ -14,6 +15,12 @@ pub fn join_control(base_url: &Url, control: &str) -> Result<Url, Error> {
     Ok(base_url.join(control).with_context(|_| {
         format_err!("unable to join base url {} with control url {:?}", base_url, control)
     })?)
+}
+
+/// Returns the `CSeq` from an RTSP response as a `u32`, or `None` if missing/unparseable.
+pub(crate) fn get_cseq(response: &rtsp_types::Response<Bytes>) -> Option<u32> {
+    response.header(&rtsp_types::headers::CSEQ)
+            .and_then(|cseq| u32::from_str_radix(cseq.as_str(), 10).ok())
 }
 
 /// Splits the string on the first occurrence of the specified delimiter and
@@ -125,9 +132,6 @@ fn parse_media(media_description: &MediaDescription) -> Result<Stream, Error> {
         rtp_payload_type,
         metadata,
         control,
-        ssrc: None,
-        initial_rtptime: None,
-        initial_seq: None,
         state: super::StreamState::Uninit,
     })
 }
@@ -183,37 +187,31 @@ pub(crate) fn parse_describe(request_url: Url, response: rtsp_types::Response<By
     })
 }
 
+pub(crate) struct SetupResponse<'a> {
+    pub(crate) session_id: &'a str,
+    pub(crate) ssrc: Option<u32>,
+    pub(crate) channel_id: u8,
+}
+
 /// Parses a `SETUP` response.
 /// `session_id` is checked for assignment or reassignment.
 /// Returns an assigned interleaved channel id (implying the next channel id
 /// is also assigned) or errors.
-pub(crate) fn parse_setup(
-    response: rtsp_types::Response<Bytes>,
-    session_id: &mut Option<String>,
-    stream: &mut Stream,
-) -> Result<u8, Error> {
-    let response_session = response.header(&rtsp_types::headers::SESSION)
+pub(crate) fn parse_setup(response: &rtsp_types::Response<Bytes>) -> Result<SetupResponse, Error> {
+    let session = response.header(&rtsp_types::headers::SESSION)
         .ok_or_else(|| format_err!("SETUP response has no Session header"))?;
-    let response_session_id = match response_session.as_str().find(';') {
-        None => response_session.as_str(),
-        Some(i) => &response_session.as_str()[..i],
-    };
-    match session_id {
-      Some(old) if old != response_session_id => {
-        bail!("SETUP response changed session id from {:?} to {:?}",
-              old, response_session_id);
-      },
-      Some(_) => {},
-      None => *session_id = Some(response_session_id.to_owned()),
+    let session_id = match session.as_str().find(';') {
+        None => session.as_str(),
+        Some(i) => &session.as_str()[..i],
     };
     let transport = response.header(&rtsp_types::headers::TRANSPORT)
         .ok_or_else(|| format_err!("SETUP response has no Transport header"))?;
     let mut channel_id = None;
+    let mut ssrc = None;
     for part in transport.as_str().split(';') {
-        if let Some(ssrc) = part.strip_prefix("ssrc=") {
-            let ssrc = u32::from_str_radix(ssrc, 16)
-                .map_err(|_| format_err!("Unparseable ssrc {}", ssrc))?;
-            stream.ssrc = Some(ssrc);
+        if let Some(v) = part.strip_prefix("ssrc=") {
+            let v = u32::from_str_radix(v, 16).map_err(|_| format_err!("Unparseable ssrc {}", v))?;
+            ssrc = Some(v);
             break;
         } else if let Some(interleaved) = part.strip_prefix("interleaved=") {
             let mut channels = interleaved.splitn(2, '-');
@@ -231,7 +229,11 @@ pub(crate) fn parse_setup(
     }
     let channel_id = channel_id
         .ok_or_else(|| format_err!("SETUP response Transport header has no interleaved parameter"))?;
-    Ok(channel_id)
+    Ok(SetupResponse {
+        session_id,
+        channel_id,
+        ssrc,
+    })
 }
 
 pub(crate) fn parse_play(
@@ -253,6 +255,16 @@ pub(crate) fn parse_play(
             .iter_mut()
             .find(|s| s.control == url)
             .ok_or_else(|| format_err!("can't find RTP-Info stream {}", url))?;
+        let state = match &mut stream.state {
+            super::StreamState::Uninit => {
+                // This appears to happen for Reolink devices. It also happens in some of other the
+                // tests here simply because I didn't include all the SETUP steps.
+                debug!("PLAY response described stream {} in Uninit state", &stream.control);
+                continue;
+            },
+            super::StreamState::Init(init) => init,
+            super::StreamState::Playing { .. } => unreachable!(),
+        };
         for part in parts {
             let (key, value) = split_once(part, '=')
                 .ok_or_else(|| format_err!("RTP-Info param has no ="))?;
@@ -260,17 +272,17 @@ pub(crate) fn parse_play(
                 "seq" => {
                     let seq = u16::from_str_radix(value, 10)
                         .map_err(|_| format_err!("bad seq {:?}", value))?;
-                    stream.initial_seq = Some(seq);
+                    state.initial_seq = Some(seq);
                 },
                 "rtptime" => {
                     let rtptime = u32::from_str_radix(value, 10)
                         .map_err(|_| format_err!("bad rtptime {:?}", value))?;
-                    stream.initial_rtptime = Some(rtptime);
+                    state.initial_rtptime = Some(rtptime);
                 },
                 "ssrc" => {
                     let ssrc = u32::from_str_radix(value, 16)
                         .map_err(|_| format_err!("Unparseable ssrc {}", value))?;
-                    stream.ssrc = Some(ssrc);
+                    state.ssrc = Some(ssrc);
                 },
                 _ => {},
             }
@@ -285,7 +297,9 @@ mod tests {
     use failure::Error;
     use url::Url;
 
-    use crate::client::video::Metadata;
+    use crate::client::{StreamStateInit, video::Metadata};
+
+    use super::super::StreamState;
 
     fn response(raw: &'static [u8]) -> rtsp_types::Response<Bytes> {
         let (msg, len) = rtsp_types::Message::parse(raw).unwrap();
@@ -344,27 +358,30 @@ mod tests {
         assert!(p.streams[2].metadata.is_none());
 
         // SETUP.
-        let mut session_id = None;
-        let channel_id = super::parse_setup(
-            response(include_bytes!("testdata/dahua_setup.txt")),
-            &mut session_id,
-            &mut p.streams[0]
-        ).unwrap();
-        assert_eq!(channel_id, 0);
-        assert_eq!(session_id, Some("634214675641".to_owned()));
-        assert_eq!(p.streams[0].ssrc, Some(0x30a98ee7));
+        let setup_response = response(include_bytes!("testdata/dahua_setup.txt"));
+        let setup_response = super::parse_setup(&setup_response).unwrap();
+        assert_eq!(setup_response.session_id, "634214675641");
+        assert_eq!(setup_response.channel_id, 0);
+        assert_eq!(setup_response.ssrc, Some(0x30a98ee7));
+        p.streams[0].state = StreamState::Init(StreamStateInit {
+            ssrc: setup_response.ssrc,
+            initial_seq: None,
+            initial_rtptime: None,
+        });
 
         // PLAY.
         super::parse_play(
             response(include_bytes!("testdata/dahua_play.txt")),
             &mut p
         ).unwrap();
-        assert_eq!(p.streams[0].initial_seq, Some(47121));
-        assert_eq!(p.streams[0].initial_rtptime, Some(3475222385));
-        assert_eq!(p.streams[1].initial_seq, Some(45186));
-        assert_eq!(p.streams[1].initial_rtptime, Some(2234446919));
-        assert_eq!(p.streams[2].initial_seq, Some(36583));
-        assert_eq!(p.streams[2].initial_rtptime, Some(816418535));
+        match &p.streams[0].state {
+            StreamState::Init(s) => {
+                assert_eq!(s.initial_seq, Some(47121));
+                assert_eq!(s.initial_rtptime, Some(3475222385));
+            },
+            _ => panic!(),
+        };
+        // The other streams don't get filled in because they're in state Uninit.
     }
 
     #[test]
@@ -419,25 +436,30 @@ mod tests {
         assert!(p.streams[1].metadata.is_none());
 
         // SETUP.
-        let mut session_id = None;
-        let channel_id = super::parse_setup(
-            response(include_bytes!("testdata/hikvision_setup.txt")),
-            &mut session_id,
-            &mut p.streams[0]
-        ).unwrap();
-        assert_eq!(channel_id, 0);
-        assert_eq!(session_id, Some("708345999".to_owned()));
-        assert_eq!(p.streams[0].ssrc, Some(0x4cacc3d1));
+        let setup_response = response(include_bytes!("testdata/hikvision_setup.txt"));
+        let setup_response = super::parse_setup(&setup_response).unwrap();
+        assert_eq!(setup_response.session_id, "708345999");
+        assert_eq!(setup_response.channel_id, 0);
+        assert_eq!(setup_response.ssrc, Some(0x4cacc3d1));
+        p.streams[0].state = StreamState::Init(StreamStateInit {
+            ssrc: setup_response.ssrc,
+            initial_seq: None,
+            initial_rtptime: None,
+        });
 
         // PLAY.
         super::parse_play(
             response(include_bytes!("testdata/hikvision_play.txt")),
             &mut p
         ).unwrap();
-        assert_eq!(p.streams[0].initial_seq, Some(24104));
-        assert_eq!(p.streams[0].initial_rtptime, Some(1270711678));
-        assert_eq!(p.streams[1].initial_seq, None);
-        assert_eq!(p.streams[1].initial_rtptime, None);
+        match p.streams[0].state {
+            StreamState::Init(state) => {
+                assert_eq!(state.initial_seq, Some(24104));
+                assert_eq!(state.initial_rtptime, Some(1270711678));
+            },
+            _ => panic!(),
+        }
+        // The other stream isn't filled in because it's in state Uninit.
     }
 
     #[test]
@@ -474,26 +496,32 @@ mod tests {
         assert!(p.streams[1].metadata.is_none());
 
         // SETUP.
-        let mut session_id = None;
-        let channel_id = super::parse_setup(
-            response(include_bytes!("testdata/reolink_setup.txt")),
-            &mut session_id,
-            &mut p.streams[0]
-        ).unwrap();
-        assert_eq!(channel_id, 0);
-        assert_eq!(session_id, Some("F8F8E425".to_owned()));
-        assert_eq!(p.streams[0].ssrc, None);
+        let setup_response = response(include_bytes!("testdata/reolink_setup.txt"));
+        let setup_response = super::parse_setup(&setup_response).unwrap();
+        assert_eq!(setup_response.session_id, "F8F8E425");
+        assert_eq!(setup_response.channel_id, 0);
+        assert_eq!(setup_response.ssrc, None);
+        p.streams[0].state = StreamState::Init(StreamStateInit::default());
+        p.streams[1].state = StreamState::Init(StreamStateInit::default());
 
         // PLAY.
         super::parse_play(
             response(include_bytes!("testdata/reolink_play.txt")),
             &mut p
         ).unwrap();
-        assert_eq!(p.streams[0].initial_seq, Some(16852));
-        assert_eq!(p.streams[0].initial_rtptime, Some(1070938629));
-        assert_eq!(p.streams[0].ssrc, Some(0xdcc4a0d8));
-        assert_eq!(p.streams[1].initial_seq, Some(39409));
-        assert_eq!(p.streams[1].initial_rtptime, Some(3075976528));
-        assert_eq!(p.streams[1].ssrc, Some(0x9fc9fff8));
+        match p.streams[0].state {
+            StreamState::Init(state) => {
+                assert_eq!(state.initial_seq, Some(16852));
+                assert_eq!(state.initial_rtptime, Some(1070938629));
+            },
+            _ => panic!(),
+        };
+        match p.streams[1].state {
+            StreamState::Init(state) => {
+                assert_eq!(state.initial_rtptime, Some(3075976528));
+                assert_eq!(state.ssrc, Some(0x9fc9fff8));
+            },
+            _ => panic!(),
+        };
     }
 }

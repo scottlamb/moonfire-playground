@@ -8,8 +8,6 @@ use log::{error, info};
 use std::{fmt::Write, path::PathBuf, str::FromStr};
 use structopt::StructOpt;
 
-pub const KEEPALIVE_DURATION: std::time::Duration = std::time::Duration::from_secs(30);
-
 #[derive(StructOpt)]
 struct Source {
     #[structopt(long, parse(try_from_str))]
