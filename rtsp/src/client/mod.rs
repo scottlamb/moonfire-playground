@@ -166,14 +166,14 @@ pub struct ChannelMapping {
 /// *   We only need to support 255 possible streams in a presentation. If
 ///     there are more than 128, we couldn't actually stream them all at once
 ///     anyway with one RTP and one RTCP channel per stream.
-/// *   We'll always use assign even channels numbers as RTP and the next higher
-///     channel number as RTCP for the same stream. This seems reasonable given
+/// *   We'll always assign even channels numbers as RTP and their odd
+///     successors as RTCP for the same stream. This seems reasonable given
 ///     that there is no clear way to assign a single channel in the RTSP spec.
 ///     [RFC 2326 section 10.12](https://tools.ietf.org/html/rfc2326#section-10.12)
 ///     says that `interleaved=n` also assigns channel `n+1`, and it's ambiguous
-///     what `interleaved=n-m` does when `m > n+1` (one phrase suggests it
-///     assigns only `n` and `m`; another suggests the full range `[n, m]`) or
-///     when `n==m`. We'll get into trouble if an RTSP server insists on
+///     what `interleaved=n-m` does when `m > n+1` (section 10.12 suggests it
+///     assigns only `n` and `m`; section 12.39 the suggests full range `[n,
+///     m]`) or when `n==m`. We'll get into trouble if an RTSP server insists on
 ///     specifying an odd `n`, but that just seems obstinate.
 /// These assumptions let us do the full mapping in 128 bytes with a trivial
 /// lookup.
