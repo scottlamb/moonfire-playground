@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use failure::{Error, bail};
+use failure::bail;
 use once_cell::sync::Lazy;
 use rtsp_types::Message;
 use std::{convert::TryFrom, fmt::{Debug, Display}};
@@ -17,13 +17,6 @@ pub static X_DYNAMIC_RATE: Lazy<rtsp_types::HeaderName> = Lazy::new(
 pub struct ReceivedMessage {
     pub ctx: Context,
     pub msg: Message<Bytes>,
-}
-
-const MAX_TS_JUMP_SECS: u32 = 10;
-
-pub struct Timeline {
-    latest: Timestamp,
-    max_jump: u32,
 }
 
 /// A RTP/RTSP timestamp.
@@ -72,46 +65,6 @@ impl std::fmt::Debug for NtpTimestamp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Write both the raw and display forms.
         write!(f, "{} /* {} */", self.0, self)
-    }
-}
-
-impl Timeline {
-    pub fn new(start: u32, clock_rate: u32) -> Self {
-        Timeline {
-            latest: Timestamp {
-                timestamp: u64::from(start),
-                start,
-                clock_rate,
-            },
-            max_jump: MAX_TS_JUMP_SECS * clock_rate,
-        }
-    }
-
-    pub fn advance(&mut self, rtp_timestamp: u32) -> Result<Timestamp, Error> {
-        // TODO: error on u64 overflow.
-        let ts_high_bits = self.latest.timestamp & 0xFFFF_FFFF_0000_0000;
-        let new_ts = match rtp_timestamp < (self.latest.timestamp as u32) {
-            true  => ts_high_bits + 1u64<<32 + u64::from(rtp_timestamp),
-            false => ts_high_bits + u64::from(rtp_timestamp),
-        };
-        let forward_ts = crate::Timestamp {
-            timestamp: new_ts,
-            clock_rate: self.latest.clock_rate,
-            start: self.latest.start,
-        };
-        let forward_delta = forward_ts.timestamp - self.latest.timestamp;
-        if forward_delta > u64::from(self.max_jump) {
-            let backward_ts = crate::Timestamp {
-                timestamp: ts_high_bits + (self.latest.timestamp & 0xFFFF_FFFF) - u64::from(rtp_timestamp),
-                clock_rate: self.latest.clock_rate,
-                start: self.latest.start,
-            };
-            bail!("Timestamp jumped (forward by {} from {} to {}, more than allowed {} sec OR backward by {} from {} to {})",
-                  forward_delta, self.latest.timestamp, new_ts, MAX_TS_JUMP_SECS,
-                  self.latest.timestamp - backward_ts.timestamp, self.latest.timestamp, backward_ts);
-        }
-        self.latest = forward_ts;
-        Ok(self.latest)
     }
 }
 

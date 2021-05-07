@@ -18,7 +18,7 @@ impl TimestampPrinter {
 
 #[async_trait]
 impl super::ChannelHandler for TimestampPrinter {
-    async fn data(&mut self, rtsp_ctx: crate::Context, timeline: &mut crate::Timeline, mut data: Bytes) -> Result<(), Error> {
+    async fn data(&mut self, rtsp_ctx: crate::Context, timeline: &mut super::Timeline, mut data: Bytes) -> Result<(), Error> {
         while !data.is_empty() {
             let h = match rtcp::header::Header::unmarshal(&data) {
                 Err(e) => bail!("corrupt RTCP header at {:#?}: {}", &rtsp_ctx, e),

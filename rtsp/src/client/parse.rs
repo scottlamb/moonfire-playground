@@ -1,70 +1,10 @@
 use bytes::{Buf, Bytes};
 use failure::{Error, ResultExt, bail, format_err};
-use sdp::{media_description::MediaDescription, session_description::SessionDescription};
+use sdp::media_description::MediaDescription;
 use url::Url;
 use std::convert::TryFrom;
 
-#[derive(Debug)]
-pub struct Presentation {
-    pub streams: Vec<Stream>,
-    pub base_url: Url,
-    pub control: String,
-    pub accept_dynamic_rate: bool,
-    sdp: SessionDescription,
-}
-
-/// Information about a stream offered within a presentation.
-/// Currently if multiple formats are offered, this only describes the first.
-#[derive(Debug)]
-pub struct Stream {
-    /// Media type, as specified in the [IANA SDP parameters media
-    /// registry](https://www.iana.org/assignments/sdp-parameters/sdp-parameters.xhtml#sdp-parameters-1).
-    pub media: String,
-
-    /// An encoding name, as specified in the [IANA media type
-    /// registry](https://www.iana.org/assignments/media-types/media-types.xhtml).
-    ///
-    /// Commonly used but not specified in that registry: the ONVIF types
-    /// claimed in the
-    /// [ONVIF Streaming Spec](https://www.onvif.org/specs/stream/ONVIF-Streaming-Spec.pdf):
-    /// *   `vnd.onvif.metadata`
-    /// *   `vnd.onvif.metadata.gzip`,
-    /// *   `vnd.onvif.metadata.exi.onvif`
-    /// *   `vnd.onvif.metadata.exi.ext`
-    pub encoding_name: String,
-
-    /// RTP payload type.
-    /// See the [registry](https://www.iana.org/assignments/rtp-parameters/rtp-parameters.xhtml#rtp-parameters-1).
-    /// It's common to use one of the dynamically assigned values, 96–127.
-    pub rtp_payload_type: u8,
-
-    /// RTP clock rate, in Hz.
-    pub clock_rate: u32,
-
-    /// The metadata, if of a known codec type.
-    /// Currently the only supported codec is H.264. This will be extended to
-    /// be an enum or something.
-    pub metadata: Option<crate::client::video::h264::Metadata>,
-
-    /// The specified control URL.
-    /// This is needed to send `SETUP` requests and interpret the `PLAY`
-    /// response's `RTP-Info` header.
-    pub control: String,
-
-    /// The RTP synchronization source (SSRC), as defined in
-    /// [RFC 3550](https://tools.ietf.org/html/rfc3550). This is normally
-    /// supplied in the `SETUP` response's `Transport` header. Reolink cameras
-    /// instead supply it in the `PLAY` response's `RTP-Info` header.
-    pub ssrc: Option<u32>,
-
-    /// The initial RTP sequence number, as specified in the `PLAY` response's
-    /// `RTP-Info` header.
-    pub initial_seq: Option<u16>,
-
-    /// The initial RTP timestamp, as specified in the `PLAY` response's
-    /// `RTP-Info` header.
-    pub initial_rtptime: Option<u32>,
-}
+use super::{Presentation, Stream};
 
 pub fn join_control(base_url: &Url, control: &str) -> Result<Url, Error> {
     //let control_value = control_value.ok_or_else(|| format_err!("control attribute has no value"))?;
@@ -85,112 +25,111 @@ pub(crate) fn split_once(str: &str, delimiter: char) -> Option<(&str, &str)> {
     str.find(delimiter).map(|p| (&str[0..p], &str[p+1..]))
 }
 
-impl Stream {
-    /// Parses from a [MediaDescription].
-    /// On failure, returns an error which is expected to be supplemented with
-    /// the [MediaDescription] debug string.
-    fn parse(media_description: &MediaDescription) -> Result<Stream, Error> {
-        // https://tools.ietf.org/html/rfc8866#section-5.14 says "If the <proto>
-        // sub-field is "RTP/AVP" or "RTP/SAVP" the <fmt> sub-fields contain RTP
-        // payload type numbers."
-        // https://www.iana.org/assignments/sdp-parameters/sdp-parameters.xhtml#sdp-parameters-2
-        // shows several other variants, such as "TCP/RTP/AVP". Looking a "RTP" component
-        // seems appropriate.
-        if !media_description.media_name.protos.iter().any(|p| p == "RTP") {
-            bail!("Expected RTP-based proto");
-        }
-
-        // RFC 8866 continues: "When a list of payload type numbers is given,
-        // this implies that all of these payload formats MAY be used in the
-        // session, but the first of these formats SHOULD be used as the default
-        // format for the session." Just use the first until we find a stream
-        // where this isn't the right thing to do.
-        let rtp_payload_type_str = media_description.media_name.formats.first()
-            .ok_or_else(|| format_err!("missing RTP payload type"))?;
-        let rtp_payload_type = u8::from_str_radix(rtp_payload_type_str, 10)
-            .map_err(|_| format_err!("invalid RTP payload type"))?;
-        if (rtp_payload_type & 0x80) != 0 {
-            bail!("invalid RTP payload type");
-        }
-
-        // Capture interesting attributes.
-        // RFC 8866: "For dynamic payload type assignments, the "a=rtpmap:"
-        // attribute (see Section 6.6) SHOULD be used to map from an RTP payload
-        // type number to a media encoding name that identifies the payload
-        // format. The "a=fmtp:" attribute MAY be used to specify format
-        // parameters (see Section 6.15)."
-        let mut rtpmap = None;
-        let mut fmtp = None;
-        let mut control = None;
-        for a in &media_description.attributes {
-            if a.key == "rtpmap" {
-                let v = a.value.as_ref().ok_or_else(|| format_err!("rtpmap attribute with no value"))?;
-                // https://tools.ietf.org/html/rfc8866#section-6.6
-                // rtpmap-value = payload-type SP encoding-name
-                //   "/" clock-rate [ "/" encoding-params ]
-                // payload-type = zero-based-integer
-                // encoding-name = token
-                // clock-rate = integer
-                // encoding-params = channels
-                // channels = integer
-                let (rtpmap_payload_type, v) = split_once(&v, ' ')
-                    .ok_or_else(|| format_err!("invalid rtmap attribute"))?;
-                if rtpmap_payload_type == rtp_payload_type_str {
-                    rtpmap = Some(v);
-                }
-            } else if a.key == "fmtp" {
-                // Similarly starts with payload-type SP.
-                let v = a.value.as_ref().ok_or_else(|| format_err!("rtpmap attribute with no value"))?;
-                let (fmtp_payload_type, v) = split_once(&v, ' ')
-                    .ok_or_else(|| format_err!("invalid rtmap attribute"))?;
-                if fmtp_payload_type == rtp_payload_type_str {
-                    fmtp = Some(v);
-                }
-            } else if a.key == "control" {
-                //control = Some(join_control(base_url, a.value.as_deref())?);
-                control = a.value.clone();
-            }
-        }
-        let control = control.ok_or_else(|| format_err!("no control url"))?;
-
-        // TODO: allow statically assigned payload types.
-        let rtpmap = rtpmap.ok_or_else(|| format_err!("Expected rtpmap for primary payload type"))?;
-
-        let (encoding_name, rtpmap) = split_once(rtpmap, '/')
-            .ok_or_else(|| format_err!("invalid rtpmap attribute"))?;
-        let clock_rate_str = match rtpmap.find('/') {
-            None => rtpmap,
-            Some(i) => &rtpmap[..i],
-        };
-        let clock_rate = u32::from_str_radix(clock_rate_str, 10)
-            .map_err(|_| format_err!("bad clockrate in rtpmap"))?;
-        let mut metadata = None;
-        
-        // https://tools.ietf.org/html/rfc6184#section-8.2.1
-        if encoding_name == "H264" {
-            if clock_rate != 90000 {
-                bail!("H.264 streams must have clock rate of 90000");
-            }
-            // This isn't an RFC 6184 requirement, but it makes things
-            // easier, and I haven't yet encountered a camera which doesn't
-            // specify out-of-band parameters.
-            let fmtp = fmtp.ok_or_else(|| format_err!(
-                "expected out-of-band parameter set for H.264 stream"))?;
-            metadata = Some(crate::client::video::h264::Metadata::from_format_specific_params(fmtp)?);
-        }
-
-        Ok(Stream {
-            media: media_description.media_name.media.clone(),
-            encoding_name: encoding_name.to_owned(),
-            clock_rate,
-            rtp_payload_type,
-            metadata,
-            control,
-            ssrc: None,
-            initial_rtptime: None,
-            initial_seq: None,
-        })
+/// Parses a [MediaDescription] to a [Stream].
+/// On failure, returns an error which is expected to be supplemented with
+/// the [MediaDescription] debug string.
+fn parse_media(media_description: &MediaDescription) -> Result<Stream, Error> {
+    // https://tools.ietf.org/html/rfc8866#section-5.14 says "If the <proto>
+    // sub-field is "RTP/AVP" or "RTP/SAVP" the <fmt> sub-fields contain RTP
+    // payload type numbers."
+    // https://www.iana.org/assignments/sdp-parameters/sdp-parameters.xhtml#sdp-parameters-2
+    // shows several other variants, such as "TCP/RTP/AVP". Looking a "RTP" component
+    // seems appropriate.
+    if !media_description.media_name.protos.iter().any(|p| p == "RTP") {
+        bail!("Expected RTP-based proto");
     }
+
+    // RFC 8866 continues: "When a list of payload type numbers is given,
+    // this implies that all of these payload formats MAY be used in the
+    // session, but the first of these formats SHOULD be used as the default
+    // format for the session." Just use the first until we find a stream
+    // where this isn't the right thing to do.
+    let rtp_payload_type_str = media_description.media_name.formats.first()
+        .ok_or_else(|| format_err!("missing RTP payload type"))?;
+    let rtp_payload_type = u8::from_str_radix(rtp_payload_type_str, 10)
+        .map_err(|_| format_err!("invalid RTP payload type"))?;
+    if (rtp_payload_type & 0x80) != 0 {
+        bail!("invalid RTP payload type");
+    }
+
+    // Capture interesting attributes.
+    // RFC 8866: "For dynamic payload type assignments, the "a=rtpmap:"
+    // attribute (see Section 6.6) SHOULD be used to map from an RTP payload
+    // type number to a media encoding name that identifies the payload
+    // format. The "a=fmtp:" attribute MAY be used to specify format
+    // parameters (see Section 6.15)."
+    let mut rtpmap = None;
+    let mut fmtp = None;
+    let mut control = None;
+    for a in &media_description.attributes {
+        if a.key == "rtpmap" {
+            let v = a.value.as_ref().ok_or_else(|| format_err!("rtpmap attribute with no value"))?;
+            // https://tools.ietf.org/html/rfc8866#section-6.6
+            // rtpmap-value = payload-type SP encoding-name
+            //   "/" clock-rate [ "/" encoding-params ]
+            // payload-type = zero-based-integer
+            // encoding-name = token
+            // clock-rate = integer
+            // encoding-params = channels
+            // channels = integer
+            let (rtpmap_payload_type, v) = split_once(&v, ' ')
+                .ok_or_else(|| format_err!("invalid rtmap attribute"))?;
+            if rtpmap_payload_type == rtp_payload_type_str {
+                rtpmap = Some(v);
+            }
+        } else if a.key == "fmtp" {
+            // Similarly starts with payload-type SP.
+            let v = a.value.as_ref().ok_or_else(|| format_err!("rtpmap attribute with no value"))?;
+            let (fmtp_payload_type, v) = split_once(&v, ' ')
+                .ok_or_else(|| format_err!("invalid rtmap attribute"))?;
+            if fmtp_payload_type == rtp_payload_type_str {
+                fmtp = Some(v);
+            }
+        } else if a.key == "control" {
+            //control = Some(join_control(base_url, a.value.as_deref())?);
+            control = a.value.clone();
+        }
+    }
+    let control = control.ok_or_else(|| format_err!("no control url"))?;
+
+    // TODO: allow statically assigned payload types.
+    let rtpmap = rtpmap.ok_or_else(|| format_err!("Expected rtpmap for primary payload type"))?;
+
+    let (encoding_name, rtpmap) = split_once(rtpmap, '/')
+        .ok_or_else(|| format_err!("invalid rtpmap attribute"))?;
+    let clock_rate_str = match rtpmap.find('/') {
+        None => rtpmap,
+        Some(i) => &rtpmap[..i],
+    };
+    let clock_rate = u32::from_str_radix(clock_rate_str, 10)
+        .map_err(|_| format_err!("bad clockrate in rtpmap"))?;
+    let mut metadata = None;
+
+    // https://tools.ietf.org/html/rfc6184#section-8.2.1
+    if encoding_name == "H264" {
+        if clock_rate != 90000 {
+            bail!("H.264 streams must have clock rate of 90000");
+        }
+        // This isn't an RFC 6184 requirement, but it makes things
+        // easier, and I haven't yet encountered a camera which doesn't
+        // specify out-of-band parameters.
+        let fmtp = fmtp.ok_or_else(|| format_err!(
+            "expected out-of-band parameter set for H.264 stream"))?;
+        metadata = Some(crate::client::video::h264::Metadata::from_format_specific_params(fmtp)?);
+    }
+
+    Ok(Stream {
+        media: media_description.media_name.media.clone(),
+        encoding_name: encoding_name.to_owned(),
+        clock_rate,
+        rtp_payload_type,
+        metadata,
+        control,
+        ssrc: None,
+        initial_rtptime: None,
+        initial_seq: None,
+        state: super::StreamState::Uninit,
+    })
 }
 
 /// Parses a successful RTSP `DESCRIBE` response into a [Presentation].
@@ -228,7 +167,7 @@ pub(crate) fn parse_describe(request_url: Url, response: rtsp_types::Response<By
     let streams = sdp.media_descriptions
         .iter()
         .enumerate()
-        .map(|(i, m)| Stream::parse(&m)
+        .map(|(i, m)| parse_media(&m)
             .with_context(|_| format!("Unable to parse stream {}: {:#?}", i, &m))
             .map_err(Error::from))
         .collect::<Result<Vec<Stream>, Error>>()?;
@@ -244,11 +183,15 @@ pub(crate) fn parse_describe(request_url: Url, response: rtsp_types::Response<By
     })
 }
 
-pub fn parse_setup(
+/// Parses a `SETUP` response.
+/// `session_id` is checked for assignment or reassignment.
+/// Returns an assigned interleaved channel id (implying the next channel id
+/// is also assigned) or errors.
+pub(crate) fn parse_setup(
     response: rtsp_types::Response<Bytes>,
     session_id: &mut Option<String>,
     stream: &mut Stream,
-) -> Result<(), Error> {
+) -> Result<u8, Error> {
     let response_session = response.header(&rtsp_types::headers::SESSION)
         .ok_or_else(|| format_err!("SETUP response has no Session header"))?;
     let response_session_id = match response_session.as_str().find(';') {
@@ -265,18 +208,33 @@ pub fn parse_setup(
     };
     let transport = response.header(&rtsp_types::headers::TRANSPORT)
         .ok_or_else(|| format_err!("SETUP response has no Transport header"))?;
+    let mut channel_id = None;
     for part in transport.as_str().split(';') {
         if let Some(ssrc) = part.strip_prefix("ssrc=") {
             let ssrc = u32::from_str_radix(ssrc, 16)
                 .map_err(|_| format_err!("Unparseable ssrc {}", ssrc))?;
             stream.ssrc = Some(ssrc);
             break;
+        } else if let Some(interleaved) = part.strip_prefix("interleaved=") {
+            let mut channels = interleaved.splitn(2, '-');
+            let n = channels.next().expect("splitn returns at least one part");
+            let n = u8::from_str_radix(n, 10).map_err(|_| format_err!("bad channel number {}", n))?;
+            if let Some(m) = channels.next() {
+                let m = u8::from_str_radix(m, 10)
+                    .map_err(|_| format_err!("bad second channel number {}", m))?;
+                if n.checked_add(1) != Some(m) {
+                    bail!("Expected adjacent channels; got {}-{}", n, m);
+                }
+            }
+            channel_id = Some(n);
         }
     }
-    Ok(())
+    let channel_id = channel_id
+        .ok_or_else(|| format_err!("SETUP response Transport header has no interleaved parameter"))?;
+    Ok(channel_id)
 }
 
-pub fn parse_play(
+pub(crate) fn parse_play(
     response: rtsp_types::Response<Bytes>,
     presentation: &mut Presentation,
 ) -> Result<(), Error> {
@@ -387,11 +345,12 @@ mod tests {
 
         // SETUP.
         let mut session_id = None;
-        super::parse_setup(
+        let channel_id = super::parse_setup(
             response(include_bytes!("testdata/dahua_setup.txt")),
             &mut session_id,
             &mut p.streams[0]
         ).unwrap();
+        assert_eq!(channel_id, 0);
         assert_eq!(session_id, Some("634214675641".to_owned()));
         assert_eq!(p.streams[0].ssrc, Some(0x30a98ee7));
 
@@ -461,11 +420,12 @@ mod tests {
 
         // SETUP.
         let mut session_id = None;
-        super::parse_setup(
+        let channel_id = super::parse_setup(
             response(include_bytes!("testdata/hikvision_setup.txt")),
             &mut session_id,
             &mut p.streams[0]
         ).unwrap();
+        assert_eq!(channel_id, 0);
         assert_eq!(session_id, Some("708345999".to_owned()));
         assert_eq!(p.streams[0].ssrc, Some(0x4cacc3d1));
 
@@ -515,11 +475,12 @@ mod tests {
 
         // SETUP.
         let mut session_id = None;
-        super::parse_setup(
+        let channel_id = super::parse_setup(
             response(include_bytes!("testdata/reolink_setup.txt")),
             &mut session_id,
             &mut p.streams[0]
         ).unwrap();
+        assert_eq!(channel_id, 0);
         assert_eq!(session_id, Some("F8F8E425".to_owned()));
         assert_eq!(p.streams[0].ssrc, None);
 

@@ -6,6 +6,16 @@ use failure::{Error, bail, format_err};
 use log::{debug, trace};
 use pretty_hex::PrettyHex;
 
+/*#[derive(Debug)]
+pub enum Message {
+    /// An RTP packet.
+    Packet(Packet),
+
+    /// An RTCP sender report.
+    SenderReport(SenderReport),
+}*/
+
+/// An RTP packet.
 #[derive(Debug)]
 pub struct Packet {
     pub rtsp_ctx: crate::Context,
@@ -14,6 +24,15 @@ pub struct Packet {
     pub mark: bool,
     pub payload: Bytes,
 }
+
+/*/// An RTCP sender report.
+#[derive(Debug)]
+pub struct SenderReport {
+    pub stream_id: usize,
+    pub rtsp_ctx: crate::Context,
+    pub timestamp: crate::Timestamp,
+    pub ntp_timestamp: crate::NtpTimestamp,
+}*/
 
 #[async_trait]
 pub trait PacketHandler {
@@ -79,7 +98,7 @@ impl<P: PacketHandler> StrictSequenceChecker<P> {
 
 #[async_trait]
 impl<P: PacketHandler + Send> super::ChannelHandler for StrictSequenceChecker<P> {
-    async fn data(&mut self, rtsp_ctx: crate::Context, timeline: &mut crate::Timeline, mut data: Bytes) -> Result<(), Error> {
+    async fn data(&mut self, rtsp_ctx: crate::Context, timeline: &mut super::Timeline, mut data: Bytes) -> Result<(), Error> {
         let reader = rtp_rs::RtpReader::new(&data[..])
             .map_err(|e| format_err!("corrupt RTP header while expecting seq={:04x} at {:#?}: {:?}", self.next_seq, &rtsp_ctx, e))?;
         let sequence_number = u16::from_be_bytes([data[2], data[3]]);
