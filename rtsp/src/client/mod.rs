@@ -158,10 +158,11 @@ impl Timeline {
             let f64_clock_rate = f64::from(self.latest.clock_rate);
             let backward_delta = (self.latest.timestamp as u32).wrapping_sub(rtp_timestamp);
             bail!("Timestamp jumped:\n\
-                   * forward by {} ({:.03} sec) from {} to {}, more than allowed {} sec OR\n\
-                   * backward by {} ({:.03} sec), more than allowed 0 sec",
-                  forward_delta, (forward_delta as f64) / f64_clock_rate, self.latest.timestamp, forward_ts, MAX_FORWARD_TIME_JUMP_SECS,
-                backward_delta, (backward_delta as f64) / f64_clock_rate);
+                  * forward by  {:10} ({:10.03} sec) from {} to {}, more than allowed {} sec OR\n\
+                  * backward by {:10} ({:10.03} sec), more than allowed 0 sec",
+                  forward_delta, (forward_delta as f64) / f64_clock_rate, self.latest.timestamp,
+                  forward_ts, MAX_FORWARD_TIME_JUMP_SECS, backward_delta,
+                  (backward_delta as f64) / f64_clock_rate);
         }
         self.latest = forward_ts;
         Ok(self.latest)
@@ -175,15 +176,15 @@ pub struct Credentials {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum ChannelType {
+enum ChannelType {
     Rtp,
     Rtcp,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct ChannelMapping {
-    pub stream_i: usize,
-    pub channel_type: ChannelType,
+struct ChannelMapping {
+    stream_i: usize,
+    channel_type: ChannelType,
 }
 
 /// Mapping of the 256 possible RTSP interleaved channels to stream indices and
@@ -407,7 +408,7 @@ impl RtspConnection {
         }
     }
 
-    /// Sends a request without waiting for a response, returning the `CSeq` as a string.
+    /// Sends a request without waiting for a response, returning the `CSeq`.
     async fn send_nowait(&mut self, req: &mut rtsp_types::Request<Bytes>) -> Result<u32, Error> {
         let cseq = self.next_cseq;
         self.next_cseq += 1;
@@ -548,7 +549,7 @@ impl Session<Described> {
 impl Session<Playing> {
     /// Returns the next packet, an error, or `None` on end of stream.
     /// Also manages keepalives; this will send them as necessary to keep the
-    /// stream open, and failed when sending a following keepalive if the
+    /// stream open, and fail when sending a following keepalive if the
     /// previous one was never acknowledged.
     ///
     /// TODO: this should also pass along RTCP packets. There can be multiple
@@ -699,7 +700,7 @@ mod tests {
 
         // Don't allow excessive forward jumps.
         let mut t = Timeline::new(100, 90_000).unwrap();
-        t.advance_to(100 + (super::MAX_FORWARD_TIME_JUMP_SECS * 90_000) + 1).unwrap();
+        t.advance_to(100 + (super::MAX_FORWARD_TIME_JUMP_SECS * 90_000) + 1).unwrap_err();
 
         // Or any backward jump.
         let mut t = Timeline::new(100, 90_000).unwrap();
