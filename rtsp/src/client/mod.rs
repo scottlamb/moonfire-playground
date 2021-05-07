@@ -143,11 +143,10 @@ impl Timeline {
         let forward_delta = rtp_timestamp.wrapping_sub(self.latest.timestamp as u32);
         let forward_ts = Timestamp {
             timestamp: self.latest.timestamp.checked_add(u64::from(forward_delta)).ok_or_else(|| {
-                // This shouldn't happen even with a hostile server. With the
-                // maximum clock rate of u32::MAX / MAX_FORWARD_TIME_JUMP_SECS
-                // and start of u32::MAX, it'd take
-                // (2^32 - 1) * MAX_FORWARD_TIME_JUMP_SECS + 1 packets to
-                // advance the time this far. (~43 billion pkts at jump=10 sec)
+                // This probably won't happen even with a hostile server. It'd
+                // take (2^32 - 1) packets (~ 4 billion) to advance the time
+                // this far, even with a clock rate chosen to maximize
+                // max_forward_jump for our MAX_FORWARD_TIME_JUMP_SECS.
                 format_err!("timestamp {} + {} will exceed u64::MAX!",
                             self.latest.timestamp, forward_delta)
             })?,
@@ -374,7 +373,7 @@ impl RtspConnection {
     }
 
     /// Sends a request and expects the next message from the peer to be its response.
-    /// Takes care of authorization and `C-Seq`. Returns `Error` if not successful.
+    /// Takes care of authorization and `CSeq`. Returns `Error` if not successful.
     async fn send(&mut self, req: &mut rtsp_types::Request<Bytes>) -> Result<rtsp_types::Response<Bytes>, Error> {
         loop {
             let cseq = self.send_nowait(req).await?;
