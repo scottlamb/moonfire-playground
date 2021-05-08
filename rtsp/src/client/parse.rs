@@ -7,8 +7,7 @@ use std::convert::TryFrom;
 
 use super::{Presentation, Stream};
 
-pub(crate) fn join_control(base_url: &Url, control: &str) -> Result<Url, Error> {
-    //let control_value = control_value.ok_or_else(|| format_err!("control attribute has no value"))?;
+fn join_control(base_url: &Url, control: &str) -> Result<Url, Error> {
     if control == "*" {
         return Ok(base_url.clone());
     }
@@ -309,7 +308,7 @@ mod tests {
         }
     }
 
-    fn parse_describe(raw_url: &'static str, raw_response: &'static [u8])
+    fn parse_describe(raw_url: &str, raw_response: &'static [u8])
         -> Result<super::Presentation, Error> {
         let url = Url::parse(raw_url).unwrap();
         super::parse_describe(url, response(raw_response))
@@ -318,18 +317,19 @@ mod tests {
     #[test]
     fn dahua_h264_aac_onvif() {
         // DESCRIBE.
+        let prefix = "rtsp://192.168.5.111:554/cam/";
         let mut p = parse_describe(
-            "rtsp://192.168.5.111:554/cam/realmonitor?channel=1&subtype=1&unicast=true&proto=Onvif",
+            &(prefix.to_string() + "realmonitor?channel=1&subtype=1&unicast=true&proto=Onvif"),
             include_bytes!("testdata/dahua_describe_h264_aac_onvif.txt")).unwrap();
         assert_eq!(
-            p.base_url.as_str(),
-            "rtsp://192.168.5.111:554/cam/realmonitor?channel=1&subtype=1&unicast=true&proto=Onvif/");
+            p.control.as_str(),
+            &(prefix.to_string() + "realmonitor?channel=1&subtype=1&unicast=true&proto=Onvif/"));
         assert!(p.accept_dynamic_rate);
 
         assert_eq!(p.streams.len(), 3);
 
         // H.264 video stream.
-        //assert_eq!(p.streams[0].control, "trackID=0");
+        assert_eq!(p.streams[0].control.as_str(), &(prefix.to_string() + "trackID=0"));
         assert_eq!(p.streams[0].media, "video");
         assert_eq!(p.streams[0].encoding_name, "H264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
@@ -341,7 +341,7 @@ mod tests {
         assert_eq!(metadata.frame_rate(), Some((2, 30)));
 
         // .mp4 audio stream.
-        //assert_eq!(p.streams[1].control, "trackID=1");
+        assert_eq!(p.streams[1].control.as_str(), &(prefix.to_string() + "trackID=1"));
         assert_eq!(p.streams[1].media, "audio");
         assert_eq!(p.streams[1].encoding_name, "MPEG4-GENERIC");
         assert_eq!(p.streams[1].rtp_payload_type, 97);
@@ -349,7 +349,7 @@ mod tests {
         assert!(p.streams[1].metadata.is_none());
 
         // ONVIF metadata stream.
-        //assert_eq!(p.streams[2].control, "trackID=4");
+        assert_eq!(p.streams[2].control.as_str(), &(prefix.to_string() + "trackID=4"));
         assert_eq!(p.streams[2].media, "application");
         assert_eq!(p.streams[2].encoding_name, "vnd.onvif.metadata");
         assert_eq!(p.streams[2].rtp_payload_type, 107);
@@ -404,8 +404,9 @@ mod tests {
     #[test]
     fn hikvision() {
         // DESCRIBE.
+        let prefix = "rtsp://192.168.5.106:554/Streaming/Channels/101";
         let mut p = parse_describe(
-            "rtsp://192.168.5.106:554/Streaming/Channels/101?transportmode=unicast&Profile=Profile_1",
+            &(prefix.to_string() + "?transportmode=unicast&Profile=Profile_1"),
             include_bytes!("testdata/hikvision_describe.txt")).unwrap();
         assert_eq!(
             p.base_url.as_str(),
@@ -415,7 +416,8 @@ mod tests {
         assert_eq!(p.streams.len(), 2);
 
         // H.264 video stream.
-        //assert_eq!(p.streams[0].control, "rtsp://192.168.5.106:554/Streaming/Channels/101/trackID=1?transportmode=unicast&profile=Profile_1");
+        assert_eq!(p.streams[0].control.as_str(),
+                   &(prefix.to_string() + "/trackID=1?transportmode=unicast&profile=Profile_1"));
         assert_eq!(p.streams[0].media, "video");
         assert_eq!(p.streams[0].encoding_name, "H264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
@@ -427,7 +429,8 @@ mod tests {
         assert_eq!(metadata.frame_rate(), Some((2_000, 60_000)));
 
         // ONVIF metadata stream.
-        //assert_eq!(p.streams[1].control, "rtsp://192.168.5.106:554/Streaming/Channels/101/trackID=3?transportmode=unicast&profile=Profile_1");
+        assert_eq!(p.streams[1].control.as_str(),
+                   &(prefix.to_string() + "/trackID=3?transportmode=unicast&profile=Profile_1"));
         assert_eq!(p.streams[1].media, "application");
         assert_eq!(p.streams[1].encoding_name, "vnd.onvif.metadata");
         assert_eq!(p.streams[1].rtp_payload_type, 107);
@@ -467,15 +470,14 @@ mod tests {
         let mut p = parse_describe(
             "rtsp://192.168.5.206:554/h264Preview_01_main",
             include_bytes!("testdata/reolink_describe.txt")).unwrap();
-        assert_eq!(
-            p.base_url.as_str(),
-            "rtsp://192.168.5.206/h264Preview_01_main/");
+        let base = "rtsp://192.168.5.206/h264Preview_01_main/";
+        assert_eq!(p.control.as_str(), base);
         assert!(!p.accept_dynamic_rate);
 
         assert_eq!(p.streams.len(), 2);
 
         // H.264 video stream.
-        //assert_eq!(p.streams[0].control, "trackID=1");
+        assert_eq!(p.streams[0].control.as_str(), &(base.to_string() + "trackID=1"));
         assert_eq!(p.streams[0].media, "video");
         assert_eq!(p.streams[0].encoding_name, "H264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
@@ -487,7 +489,7 @@ mod tests {
         assert_eq!(metadata.frame_rate(), None);
 
         // audio stream
-        //assert_eq!(p.streams[1].control, "trackID=2");
+        assert_eq!(p.streams[1].control.as_str(), &(base.to_string() + "trackID=2"));
         assert_eq!(p.streams[1].media, "audio");
         assert_eq!(p.streams[1].encoding_name, "MPEG4-GENERIC");
         assert_eq!(p.streams[1].rtp_payload_type, 97);
@@ -519,6 +521,63 @@ mod tests {
             StreamState::Init(state) => {
                 assert_eq!(state.initial_rtptime, Some(3075976528));
                 assert_eq!(state.ssrc, Some(0x9fc9fff8));
+            },
+            _ => panic!(),
+        };
+    }
+
+    #[test]
+    fn bunny() {
+        // This is a public test server for Wowza Streaming Engine.
+        // https://www.wowza.com/html/mobile.html
+
+        // DESCRIBE.
+        let prefix = "rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mov";
+        let mut p = parse_describe(prefix, include_bytes!("testdata/bunny_describe.txt")).unwrap();
+        assert_eq!(p.control.as_str(), &(prefix.to_string() + "/"));
+        assert!(!p.accept_dynamic_rate);
+
+        assert_eq!(p.streams.len(), 2);
+
+        // audio stream
+        assert_eq!(p.streams[0].control.as_str(), &(prefix.to_string() + "/trackID=1"));
+        assert_eq!(p.streams[0].media, "audio");
+        assert_eq!(p.streams[0].encoding_name, "mpeg4-generic");
+        assert_eq!(p.streams[0].rtp_payload_type, 96);
+        assert_eq!(p.streams[0].clock_rate, 12_000);
+        assert!(p.streams[0].metadata.is_none());
+
+        // H.264 video stream.
+        assert_eq!(p.streams[1].control.as_str(), &(prefix.to_string() + "/trackID=2"));
+        assert_eq!(p.streams[1].media, "video");
+        assert_eq!(p.streams[1].encoding_name, "H264");
+        assert_eq!(p.streams[1].rtp_payload_type, 97);
+        assert_eq!(p.streams[1].clock_rate, 90_000);
+        let metadata = p.streams[1].metadata.as_ref().unwrap();
+        assert_eq!(metadata.rfc6381_codec(), "avc1.42C01E");
+        assert_eq!(metadata.pixel_dimensions(), (240, 160));
+        assert_eq!(metadata.pixel_aspect_ratio(), None);
+        assert_eq!(metadata.frame_rate(), Some((2, 48)));
+
+        // SETUP.
+        let setup_response = response(include_bytes!("testdata/bunny_setup.txt"));
+        let setup_response = super::parse_setup(&setup_response).unwrap();
+        assert_eq!(setup_response.session_id, "1642021126");
+        assert_eq!(setup_response.channel_id, 0);
+        assert_eq!(setup_response.ssrc, None);
+        p.streams[0].state = StreamState::Init(StreamStateInit::default());
+        p.streams[1].state = StreamState::Init(StreamStateInit::default());
+
+        // PLAY.
+        super::parse_play(
+            response(include_bytes!("testdata/bunny_play.txt")),
+            &mut p
+        ).unwrap();
+        match p.streams[1].state {
+            StreamState::Init(state) => {
+                assert_eq!(state.initial_rtptime, Some(0));
+                assert_eq!(state.initial_seq, Some(1));
+                assert_eq!(state.ssrc, None);
             },
             _ => panic!(),
         };
