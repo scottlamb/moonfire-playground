@@ -26,7 +26,7 @@ pub const KEEPALIVE_DURATION: std::time::Duration = std::time::Duration::from_se
 pub struct Presentation {
     pub streams: Vec<Stream>,
     pub base_url: Url,
-    pub control: String,
+    pub control: Url,
     pub accept_dynamic_rate: bool,
     sdp: SessionDescription,
 }
@@ -67,7 +67,7 @@ pub struct Stream {
     /// The specified control URL.
     /// This is needed to send `SETUP` requests and interpret the `PLAY`
     /// response's `RTP-Info` header.
-    pub control: String,
+    pub control: Url,
 
 
     state: StreamState,
@@ -466,7 +466,7 @@ impl Session<Described> {
         let proposed_channel_id = self.state.channels.next_unassigned()?;
         let response = self.conn.send(
             &mut rtsp_types::Request::builder(rtsp_types::Method::Setup, rtsp_types::Version::V1_0)
-            .request_uri(parse::join_control(&self.state.presentation.base_url, &stream.control)?)
+            .request_uri(stream.control.clone())
             .header(
                 rtsp_types::headers::TRANSPORT,
                 format!(
@@ -503,7 +503,7 @@ impl Session<Described> {
         trace!("PLAY with channel mappings: {:#?}", &self.state.channels);
         let response = self.conn.send(
             &mut rtsp_types::Request::builder(rtsp_types::Method::Play, rtsp_types::Version::V1_0)
-            .request_uri(parse::join_control(&self.state.presentation.base_url, &self.state.presentation.control)?)
+            .request_uri(self.state.presentation.control.clone())
             .header(rtsp_types::headers::SESSION, session_id.clone())
             .header(rtsp_types::headers::RANGE, "npt=0.000-".to_owned())
             .build(Bytes::new())).await?;
@@ -514,9 +514,10 @@ impl Session<Described> {
         for (i, s) in self.state.presentation.streams.iter_mut().enumerate() {
             match s.state {
                 StreamState::Init(StreamStateInit {
-                    ssrc: Some(ssrc),
                     initial_rtptime: Some(initial_rtptime),
                     initial_seq: Some(initial_seq),
+                    ssrc,
+                    ..
                  }) => {
                     s.state = StreamState::Playing {
                         timeline: Timeline::new(initial_rtptime, s.clock_rate)?,
@@ -525,8 +526,8 @@ impl Session<Described> {
                     };
                 },
                 StreamState::Init(init) => bail!(
-                    "Expected all init parameters {:#?} to be specified after PLAY response, \
-                    stream {}/{:#?}",
+                    "Expected rtptime and seq to be specified, got {:#?} after PLAY response, \
+                    stream {} / {:#?}",
                     init, i, s),
                 StreamState::Uninit => {},
                 StreamState::Playing{..} => unreachable!(),

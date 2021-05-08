@@ -35,7 +35,7 @@ pub(crate) fn split_once(str: &str, delimiter: char) -> Option<(&str, &str)> {
 /// Parses a [MediaDescription] to a [Stream].
 /// On failure, returns an error which is expected to be supplemented with
 /// the [MediaDescription] debug string.
-fn parse_media(media_description: &MediaDescription) -> Result<Stream, Error> {
+fn parse_media(base_url: &Url, media_description: &MediaDescription) -> Result<Stream, Error> {
     // https://tools.ietf.org/html/rfc8866#section-5.14 says "If the <proto>
     // sub-field is "RTP/AVP" or "RTP/SAVP" the <fmt> sub-fields contain RTP
     // payload type numbers."
@@ -93,8 +93,7 @@ fn parse_media(media_description: &MediaDescription) -> Result<Stream, Error> {
                 fmtp = Some(v);
             }
         } else if a.key == "control" {
-            //control = Some(join_control(base_url, a.value.as_deref())?);
-            control = a.value.clone();
+            control = a.value.as_deref().map(|c| join_control(base_url, c)).transpose()?;
         }
     }
     let control = control.ok_or_else(|| format_err!("no control url"))?;
@@ -161,8 +160,7 @@ pub(crate) fn parse_describe(request_url: Url, response: rtsp_types::Response<By
     let mut control = None;
     for a in &sdp.attributes {
         if a.key == "control" {
-            //control = Some(join_control(&base_url, a.value.as_deref())?);
-            control = a.value.clone();
+            control = a.value.as_deref().map(|c| join_control(&base_url, c)).transpose()?;
             break;
         }
     }
@@ -171,7 +169,7 @@ pub(crate) fn parse_describe(request_url: Url, response: rtsp_types::Response<By
     let streams = sdp.media_descriptions
         .iter()
         .enumerate()
-        .map(|(i, m)| parse_media(&m)
+        .map(|(i, m)| parse_media(&base_url, &m)
             .with_context(|_| format!("Unable to parse stream {}: {:#?}", i, &m))
             .map_err(Error::from))
         .collect::<Result<Vec<Stream>, Error>>()?;
@@ -251,6 +249,7 @@ pub(crate) fn parse_play(
             .expect("split always returns at least one part")
             .strip_prefix("url=")
             .ok_or_else(|| format_err!("RTP-Info missing stream URL"))?;
+        let url = join_control(&presentation.base_url, url)?;
         let stream = presentation.streams
             .iter_mut()
             .find(|s| s.control == url)
@@ -330,7 +329,7 @@ mod tests {
         assert_eq!(p.streams.len(), 3);
 
         // H.264 video stream.
-        assert_eq!(p.streams[0].control, "trackID=0");
+        //assert_eq!(p.streams[0].control, "trackID=0");
         assert_eq!(p.streams[0].media, "video");
         assert_eq!(p.streams[0].encoding_name, "H264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
@@ -342,7 +341,7 @@ mod tests {
         assert_eq!(metadata.frame_rate(), Some((2, 30)));
 
         // .mp4 audio stream.
-        assert_eq!(p.streams[1].control, "trackID=1");
+        //assert_eq!(p.streams[1].control, "trackID=1");
         assert_eq!(p.streams[1].media, "audio");
         assert_eq!(p.streams[1].encoding_name, "MPEG4-GENERIC");
         assert_eq!(p.streams[1].rtp_payload_type, 97);
@@ -350,7 +349,7 @@ mod tests {
         assert!(p.streams[1].metadata.is_none());
 
         // ONVIF metadata stream.
-        assert_eq!(p.streams[2].control, "trackID=4");
+        //assert_eq!(p.streams[2].control, "trackID=4");
         assert_eq!(p.streams[2].media, "application");
         assert_eq!(p.streams[2].encoding_name, "vnd.onvif.metadata");
         assert_eq!(p.streams[2].rtp_payload_type, 107);
@@ -416,7 +415,7 @@ mod tests {
         assert_eq!(p.streams.len(), 2);
 
         // H.264 video stream.
-        assert_eq!(p.streams[0].control, "rtsp://192.168.5.106:554/Streaming/Channels/101/trackID=1?transportmode=unicast&profile=Profile_1");
+        //assert_eq!(p.streams[0].control, "rtsp://192.168.5.106:554/Streaming/Channels/101/trackID=1?transportmode=unicast&profile=Profile_1");
         assert_eq!(p.streams[0].media, "video");
         assert_eq!(p.streams[0].encoding_name, "H264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
@@ -428,7 +427,7 @@ mod tests {
         assert_eq!(metadata.frame_rate(), Some((2_000, 60_000)));
 
         // ONVIF metadata stream.
-        assert_eq!(p.streams[1].control, "rtsp://192.168.5.106:554/Streaming/Channels/101/trackID=3?transportmode=unicast&profile=Profile_1");
+        //assert_eq!(p.streams[1].control, "rtsp://192.168.5.106:554/Streaming/Channels/101/trackID=3?transportmode=unicast&profile=Profile_1");
         assert_eq!(p.streams[1].media, "application");
         assert_eq!(p.streams[1].encoding_name, "vnd.onvif.metadata");
         assert_eq!(p.streams[1].rtp_payload_type, 107);
@@ -476,7 +475,7 @@ mod tests {
         assert_eq!(p.streams.len(), 2);
 
         // H.264 video stream.
-        assert_eq!(p.streams[0].control, "trackID=1");
+        //assert_eq!(p.streams[0].control, "trackID=1");
         assert_eq!(p.streams[0].media, "video");
         assert_eq!(p.streams[0].encoding_name, "H264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
@@ -488,7 +487,7 @@ mod tests {
         assert_eq!(metadata.frame_rate(), None);
 
         // audio stream
-        assert_eq!(p.streams[1].control, "trackID=2");
+        //assert_eq!(p.streams[1].control, "trackID=2");
         assert_eq!(p.streams[1].media, "audio");
         assert_eq!(p.streams[1].encoding_name, "MPEG4-GENERIC");
         assert_eq!(p.streams[1].rtp_payload_type, 97);

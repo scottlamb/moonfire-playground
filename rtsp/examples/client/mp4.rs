@@ -40,6 +40,14 @@ macro_rules! write_box {
     }};
 }
 
+async fn write_all_buf<W: AsyncWrite + Unpin, B: Buf>(writer: &mut W, buf: &mut B) -> Result<(), Error> {
+    // TODO: this doesn't use vectored I/O. Annoying.
+    while buf.has_remaining() {
+        writer.write_buf(buf).await?;
+    }
+    Ok(())
+}
+
 /// Writes `.mp4` data to a sink.
 /// See module-level documentation for details.
 pub struct Mp4Writer<W: AsyncWrite + AsyncSeek + Send + Unpin> {
@@ -76,7 +84,7 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
         });
         buf.extend_from_slice(&b"\0\0\0\0mdat"[..]);
         let mdat_start = u32::try_from(buf.len())?;
-        inner.write_buf(&mut buf).await?;
+        write_all_buf(&mut inner, &mut buf).await?;
         Ok(Mp4Writer {
             inner,
             metadata,
@@ -222,7 +230,7 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
                 });
             });
         });
-        self.inner.write_buf(&mut buf.freeze()).await?;
+        write_all_buf(&mut self.inner, &mut buf.freeze()).await?;
         self.inner.seek(SeekFrom::Start(u64::from(self.mdat_start - 8))).await?;
         self.inner.write_all(&u32::try_from(self.mdat_len)?.to_be_bytes()[..]).await?;
         Ok(())
@@ -281,10 +289,7 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> VideoHandler for Mp4Writer<W> {
 
         self.mdat_len = u32::try_from(usize::try_from(self.mdat_len)? + picture.remaining())?;
 
-        // TODO: this doesn't use vectored IO. annoying.
-        while picture.has_remaining() {
-          self.inner.write_buf(&mut picture).await?;
-        }
+        write_all_buf(&mut self.inner, &mut picture).await?;
         Ok(())
     }
 }

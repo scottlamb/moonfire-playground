@@ -76,13 +76,13 @@ const MAX_INITIAL_SEQ_SKIP: u16 = 128;
 /// not sure it will ever come up with IP cameras.
 #[derive(Debug)]
 pub(super) struct StrictSequenceChecker {
-    ssrc: u32,
+    ssrc: Option<u32>,
     next_seq: u16,
     max_seq_skip: u16,
 }
 
 impl StrictSequenceChecker {
-    pub(super) fn new(ssrc: u32, next_seq: u16) -> Self {
+    pub(super) fn new(ssrc: Option<u32>, next_seq: u16) -> Self {
         Self {
             ssrc,
             next_seq,
@@ -102,11 +102,12 @@ impl StrictSequenceChecker {
                                                    sequence_number, &rtsp_ctx)).into()),
         };
         let ssrc = reader.ssrc();
-        if ssrc != self.ssrc
+        if (self.ssrc != None && self.ssrc != Some(ssrc))
            || sequence_number.wrapping_sub(self.next_seq) > self.max_seq_skip {
-            bail!("Expected ssrc={:08x} seq={:04x} got ssrc={:08x} seq={:04x} ts={} at {:#?}",
+            bail!("Expected ssrc={:08x?} seq={:04x} got ssrc={:08x} seq={:04x} ts={} at {:#?}",
                   self.ssrc, self.next_seq, ssrc, sequence_number, timestamp, &rtsp_ctx);
         }
+        self.ssrc = Some(ssrc);
         let mark = reader.mark();
         let payload_range = crate::as_range(&data, reader.payload())
             .ok_or_else(|| format_err!("empty payload at {:#?}", &rtsp_ctx))?;

@@ -124,7 +124,20 @@ impl<A: AccessUnitHandler + Send> crate::client::rtp::PacketHandler for Handler<
                 }
                 self.inner.nal(data).await?;
             },
-            24..=27 | 29 => unimplemented!("unimplemented NAL (header {:02x}) at seq {:04x} {:#?}", nal_header, seq, &pkt.rtsp_ctx),
+            24 => { // STAP-A
+                data.advance(1);  // skip the header byte.
+                while data.remaining() > 2 {
+                    let len = usize::from(data.get_u16());
+                    if data.remaining() < len {
+                        bail!("STAP-A too short");
+                    }
+                    self.inner.nal(data.split_to(len)).await?;
+                }
+                if data.has_remaining() {
+                    bail!("STAP-A too short");
+                }
+            },
+            25..=27 | 29 => unimplemented!("unimplemented NAL (header 0x{:02x}) at seq {:04x} {:#?}", nal_header, seq, &pkt.rtsp_ctx),
             28 => {
                 // FU-A. https://tools.ietf.org/html/rfc6184#section-5.8
                 if data.len() < 3 {
@@ -488,16 +501,6 @@ impl Metadata {
         avc_decoder_config.extend_from_slice(&pps_nal[..]);
         let pps_nal_end = avc_decoder_config.len();
         assert_eq!(avc_decoder_config.len(), 11 + sps_nal.len() + pps_nal.len());
-        let parsed = h264_reader::avcc::AvcDecoderConfigurationRecord::try_from(&avc_decoder_config[..])
-            .map_err(|e| format_err!("new AvcDecoderConfigurationRecord doesn't parse: {:#?}", e))?;
-        for s in parsed.sequence_parameter_sets() {
-            let s = s.map_err(|e| format_err!("bad SPS: {:#?}", e))?;
-            debug!("SPS: {:#?}", s);
-        }
-        for p in parsed.picture_parameter_sets() {
-            let p = p.map_err(|e| format_err!("bad PPS: {:#?}", e))?;
-            debug!("PPS: {:#?}", p);
-        }
 
         let (pixel_aspect_ratio, frame_rate);
         match sps.vui_parameters {
