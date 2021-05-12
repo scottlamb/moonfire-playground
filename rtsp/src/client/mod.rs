@@ -1,4 +1,4 @@
-use std::{fmt::Debug, num::NonZeroU8, pin::Pin};
+use std::{fmt::Debug, num::{NonZeroU32, NonZeroU8}, pin::Pin};
 
 use bytes::Bytes;
 use failure::{Error, bail, format_err};
@@ -58,6 +58,9 @@ pub struct Stream {
 
     /// RTP clock rate, in Hz.
     pub clock_rate: u32,
+
+    /// Number of audio channels, if applicable (`media` is `audio`) and known.
+    pub channels: Option<NonZeroU32>,
 
     /// The metadata, if of a known codec type.
     /// Currently the only supported codec is H.264. This will be extended to

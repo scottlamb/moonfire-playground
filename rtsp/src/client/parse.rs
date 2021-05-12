@@ -3,9 +3,182 @@ use failure::{Error, ResultExt, bail, format_err};
 use log::debug;
 use sdp::media_description::MediaDescription;
 use url::Url;
-use std::convert::TryFrom;
+use std::{convert::TryFrom, num::NonZeroU32};
 
 use super::{Presentation, Stream};
+
+/// A static payload type in the [RTP parameters
+/// registry](https://www.iana.org/assignments/rtp-parameters/rtp-parameters.xhtml#rtp-parameters-1).
+#[derive(Debug)]
+struct StaticPayloadType {
+    encoding: &'static str,
+    media: &'static str,
+    clock_rate: u32,
+    channels: Option<NonZeroU32>,
+}
+
+/// All registered static payload types.
+/// The registry is officially closed, so this list should never change.
+static STATIC_PAYLOAD_TYPES: [Option<StaticPayloadType>; 35] = [
+    /* 0 */ Some(StaticPayloadType {
+        encoding: "PCMU",
+        media: "audio",
+        clock_rate: 8_000,
+        channels: NonZeroU32::new(1),
+    }),
+    /* 1 */ None, // reserved
+    /* 2 */ None, // reserved
+    /* 3 */ Some(StaticPayloadType {
+        encoding: "GSM",
+        media: "audio",
+        clock_rate: 8_000,
+        channels: NonZeroU32::new(1),
+    }),
+    /* 4 */ Some(StaticPayloadType {
+        encoding: "G723",
+        media: "audio",
+        clock_rate: 8_000,
+        channels: NonZeroU32::new(1),
+    }),
+    /* 5 */ Some(StaticPayloadType {
+        encoding: "DVI4",
+        media: "audio",
+        clock_rate: 8_000,
+        channels: NonZeroU32::new(1),
+    }),
+    /* 6 */ Some(StaticPayloadType {
+        encoding: "DVI4",
+        media: "audio",
+        clock_rate: 16_000,
+        channels: NonZeroU32::new(1),
+    }),
+    /* 7 */ Some(StaticPayloadType {
+        encoding: "LPC",
+        media: "audio",
+        clock_rate: 8_000,
+        channels: NonZeroU32::new(1),
+    }),
+    /* 8 */ Some(StaticPayloadType {
+        encoding: "PCMA",
+        media: "audio",
+        clock_rate: 8_000,
+        channels: NonZeroU32::new(1),
+    }),
+    /* 9 */ Some(StaticPayloadType {
+        encoding: "G722",
+        media: "audio",
+        clock_rate: 8_000,
+        channels: NonZeroU32::new(1),
+    }),
+    /* 10 */ Some(StaticPayloadType {
+        encoding: "L16",
+        media: "audio",
+        clock_rate: 441_000,
+        channels: NonZeroU32::new(2),
+    }),
+    /* 11 */ Some(StaticPayloadType {
+        encoding: "L16",
+        media: "audio",
+        clock_rate: 441_000,
+        channels: NonZeroU32::new(1),
+    }),
+    /* 12 */ Some(StaticPayloadType {
+        encoding: "QCELP",
+        media: "audio",
+        clock_rate: 8_000,
+        channels: NonZeroU32::new(1),
+    }),
+    /* 13 */ Some(StaticPayloadType {
+        encoding: "CN",
+        media: "audio",
+        clock_rate: 8_000,
+        channels: NonZeroU32::new(1),
+    }),
+    /* 14 */ Some(StaticPayloadType {
+        encoding: "MPA",
+        media: "audio",
+        clock_rate: 90_000,
+        channels: None,
+    }),
+    /* 15 */ Some(StaticPayloadType {
+        encoding: "G728",
+        media: "audio",
+        clock_rate: 8_000,
+        channels: NonZeroU32::new(1),
+    }),
+    /* 16 */ Some(StaticPayloadType {
+        encoding: "DVI4",
+        media: "audio",
+        clock_rate: 11_025,
+        channels: NonZeroU32::new(1),
+    }),
+    /* 17 */ Some(StaticPayloadType {
+        encoding: "DVI4",
+        media: "audio",
+        clock_rate: 22_050,
+        channels: NonZeroU32::new(1),
+    }),
+    /* 18 */ Some(StaticPayloadType {
+        encoding: "G729",
+        media: "audio",
+        clock_rate: 8_000,
+        channels: NonZeroU32::new(1),
+    }),
+    /* 19 */ None, // reserved
+    /* 20 */ None, // unassigned
+    /* 21 */ None, // unassigned
+    /* 22 */ None, // unassigned
+    /* 23 */ None, // unassigned
+    /* 24 */ None, // unassigned
+    /* 25 */ Some(StaticPayloadType {
+        encoding: "CelB",
+        media: "video",
+        clock_rate: 90_000,
+        channels: None,
+    }),
+    /* 26 */ Some(StaticPayloadType {
+        encoding: "JPEG",
+        media: "video",
+        clock_rate: 90_000,
+        channels: None,
+    }),
+    /* 27 */ None, // unassigned
+    /* 28 */ Some(StaticPayloadType {
+        encoding: "nv",
+        media: "video",
+        clock_rate: 90_000,
+        channels: None,
+    }),
+    /* 29 */ None, // unassigned
+    /* 30 */ None, // unassigned
+    /* 31 */ Some(StaticPayloadType {
+        encoding: "H261",
+        media: "video",
+        clock_rate: 90_000,
+        channels: None,
+    }),
+    /* 32 */ Some(StaticPayloadType {
+        encoding: "MPV",
+        media: "video",
+        clock_rate: 90_000,
+        channels: None,
+    }),
+    /* 33 */ Some(StaticPayloadType {
+        encoding: "MP2T",
+        // The RTP parameters registry says type AV (audio and video).
+        // The MIME registration says the media type is "video".
+        // https://datatracker.ietf.org/doc/html/rfc3555#section-4.2.9
+        media: "video",
+        clock_rate: 90_000,
+        channels: None,
+    }),
+    /* 34 */ Some(StaticPayloadType {
+        encoding: "H263",
+        media: "video",
+        clock_rate: 90_000,
+        channels: None,
+    }),
+];
 
 fn join_control(base_url: &Url, control: &str) -> Result<Url, Error> {
     if control == "*" {
@@ -98,16 +271,44 @@ fn parse_media(base_url: &Url, media_description: &MediaDescription) -> Result<S
     let control = control.ok_or_else(|| format_err!("no control url"))?;
 
     // TODO: allow statically assigned payload types.
-    let rtpmap = rtpmap.ok_or_else(|| format_err!("Expected rtpmap for primary payload type"))?;
+    let encoding_name;
+    let clock_rate;
+    let channels;
+    match rtpmap {
+        Some(rtpmap) => {
+            let (e, rtpmap) = split_once(rtpmap, '/')
+                .ok_or_else(|| format_err!("invalid rtpmap attribute"))?;
+            encoding_name = e;
+            let (clock_rate_str, channels_str) = match rtpmap.find('/') {
+                None => (rtpmap, None),
+                Some(i) => (&rtpmap[..i], Some(&rtpmap[i+1..])),
+            };
+            clock_rate = u32::from_str_radix(clock_rate_str, 10)
+                .map_err(|_| format_err!("bad clockrate in rtpmap"))?;
+            channels = channels_str.map(|c| {
+                u32::from_str_radix(c, 10)
+                    .ok()
+                    .and_then(NonZeroU32::new)
+                    .ok_or_else(|| format_err!("Invalid channels specification {:?}", c))
+            }).transpose()?;
+        },
+        None => {
+            let type_ = STATIC_PAYLOAD_TYPES.get(usize::from(rtp_payload_type))
+                .and_then(Option::as_ref)
+                .ok_or_else(|| format_err!(
+                    "Expected rtpmap parameter or assigned static payload type (got {})",
+                    rtp_payload_type))?;
+            encoding_name = type_.encoding;
+            clock_rate = type_.clock_rate;
+            channels = type_.channels;
+            if type_.media != media_description.media_name.media {
+                bail!("SDP media type {} must match RTP payload type {:#?}",
+                      &media_description.media_name.media,
+                      type_);
+            }
+        }
+    }
 
-    let (encoding_name, rtpmap) = split_once(rtpmap, '/')
-        .ok_or_else(|| format_err!("invalid rtpmap attribute"))?;
-    let clock_rate_str = match rtpmap.find('/') {
-        None => rtpmap,
-        Some(i) => &rtpmap[..i],
-    };
-    let clock_rate = u32::from_str_radix(clock_rate_str, 10)
-        .map_err(|_| format_err!("bad clockrate in rtpmap"))?;
     let mut metadata = None;
 
     // https://tools.ietf.org/html/rfc6184#section-8.2.1
@@ -130,6 +331,7 @@ fn parse_media(base_url: &Url, media_description: &MediaDescription) -> Result<S
         rtp_payload_type,
         metadata,
         control,
+        channels,
         state: super::StreamState::Uninit,
     })
 }
@@ -291,6 +493,8 @@ pub(crate) fn parse_play(
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use bytes::Bytes;
     use failure::Error;
     use url::Url;
@@ -545,6 +749,7 @@ mod tests {
         assert_eq!(p.streams[0].encoding_name, "mpeg4-generic");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
         assert_eq!(p.streams[0].clock_rate, 12_000);
+        assert_eq!(p.streams[0].channels, NonZeroU32::new(2));
         assert!(p.streams[0].metadata.is_none());
 
         // H.264 video stream.
@@ -581,5 +786,37 @@ mod tests {
             },
             _ => panic!(),
         };
+    }
+
+    #[test]
+    fn foscam() {
+        // DESCRIBE.
+        let prefix = "rtsp://192.168.5.107:65534/videoMain";
+        let p = parse_describe(prefix, include_bytes!("testdata/foscam_describe.txt")).unwrap();
+        assert_eq!(p.control.as_str(), &(prefix.to_string() + "/"));
+        assert!(!p.accept_dynamic_rate);
+
+        assert_eq!(p.streams.len(), 2);
+
+        // H.264 video stream.
+        assert_eq!(p.streams[0].control.as_str(), &(prefix.to_string() + "/track1"));
+        assert_eq!(p.streams[0].media, "video");
+        assert_eq!(p.streams[0].encoding_name, "H264");
+        assert_eq!(p.streams[0].rtp_payload_type, 96);
+        assert_eq!(p.streams[0].clock_rate, 90_000);
+        let metadata = p.streams[0].metadata.as_ref().unwrap();
+        assert_eq!(metadata.rfc6381_codec(), "avc1.4D001F");
+        assert_eq!(metadata.pixel_dimensions(), (1280, 720));
+        assert_eq!(metadata.pixel_aspect_ratio(), None);
+        assert_eq!(metadata.frame_rate(), None);
+
+        // audio stream
+        assert_eq!(p.streams[1].control.as_str(), &(prefix.to_string() + "/track2"));
+        assert_eq!(p.streams[1].media, "audio");
+        assert_eq!(p.streams[1].encoding_name, "PCMU");
+        assert_eq!(p.streams[1].rtp_payload_type, 0);
+        assert_eq!(p.streams[1].clock_rate, 8_000);
+        assert_eq!(p.streams[1].channels, NonZeroU32::new(1));
+        assert!(p.streams[1].metadata.is_none());
     }
 }
