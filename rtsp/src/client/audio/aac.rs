@@ -14,7 +14,6 @@
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use failure::{Error, bail, format_err};
-use log::trace;
 use pretty_hex::PrettyHex;
 use std::{convert::TryFrom, fmt::Debug};
 
@@ -28,8 +27,33 @@ struct AudioSpecificConfig {
     audio_object_type: u8,
     frame_length: u32,
     sampling_frequency: u32,
-    channels: u8,
+    channels: &'static ChannelConfig,
 }
+
+/// A channel configuration as in ISO/IEC 14496-3 Table 1.19.
+#[derive(Debug)]
+struct ChannelConfig {
+    channels: u16,
+
+    /// The "number of considered channels" as defined in ISO/IEC 13818-7 Term
+    /// 3.58. Roughly, non-subwoofer channels.
+    ncc: u16,
+
+    /// A human-friendly name for the channel configuration.
+    name: &'static str,
+}
+
+#[rustfmt::skip]
+const CHANNEL_CONFIGS: [Option<ChannelConfig>; 8] = [
+    /* 0 */ None, // "defined in AOT related SpecificConfig"
+    /* 1 */ Some(ChannelConfig { channels: 1, ncc: 1, name: "mono" }),
+    /* 2 */ Some(ChannelConfig { channels: 2, ncc: 2, name: "stereo" }),
+    /* 3 */ Some(ChannelConfig { channels: 3, ncc: 3, name: "3.0" }),
+    /* 4 */ Some(ChannelConfig { channels: 4, ncc: 4, name: "4.0" }),
+    /* 5 */ Some(ChannelConfig { channels: 5, ncc: 5, name: "5.0" }),
+    /* 6 */ Some(ChannelConfig { channels: 6, ncc: 5, name: "5.1" }),
+    /* 7 */ Some(ChannelConfig { channels: 8, ncc: 7, name: "7.1" }),
+];
 
 impl AudioSpecificConfig {
     /// Parses from raw bytes.
@@ -58,11 +82,12 @@ impl AudioSpecificConfig {
             0xf => r.read_u32(24)?,
             _ => unreachable!(),
         };
-        let channels = match r.read_u8(4).unwrap() {
-            0 => bail!("interpreting AOT related SpecificConfig unimplemented"),
-            i @ 1..=7 => i,
-            v @ 8..=15 => bail!("reserved channelConfiguration value 0x{:x}", v),
-            _ => unreachable!(),
+        let channels = {
+            let c = r.read_u8(4)?;
+            CHANNEL_CONFIGS.get(usize::from(c))
+                .ok_or_else(|| format_err!("reserved channelConfiguration 0x{:x}", c))?
+                .as_ref()
+                .ok_or_else(|| format_err!("program_config_element parsing unimplemented"))?
         };
         if audio_object_type == 5 || audio_object_type == 29 {
             // extensionSamplingFrequencyIndex + extensionSamplingFrequency.
@@ -145,7 +170,7 @@ macro_rules! write_box {
     }};
 }
 
-/// Writes a descriptor tag and length for everything appended in the supplie
+/// Writes a descriptor tag and length for everything appended in the supplied
 /// scope. See ISO/IEC 14496-1 Table 1 for the `tag`.
 macro_rules! write_descriptor {
     ($buf:expr, $tag:expr, $b:block) => {{
@@ -188,7 +213,7 @@ fn get_mp4a_box(parsed: &AudioSpecificConfig, config: &[u8]) -> Result<Bytes, Er
             0, 0, 0, 0,             // AudioSampleEntry.reserved
             0, 0, 0, 0,             // AudioSampleEntry.reserved
         ]);
-        buf.put_u16(u16::from(parsed.channels));
+        buf.put_u16(u16::from(parsed.channels.channels));
         buf.extend_from_slice(&[
             0x00, 0x10,             // AudioSampleEntry.samplesize
             0x00, 0x00, 0x00, 0x00, // AudioSampleEntry.pre_defined, AudioSampleEntry.reserved
@@ -230,12 +255,8 @@ fn get_mp4a_box(parsed: &AudioSpecificConfig, config: &[u8]) -> Result<Bytes, Er
                     // bufferSizeDb is "the size of the decoding buffer for this
                     // elementary stream in byte". ISO/IEC 13818-7 section
                     // 8.2.2.1 defines the total decoder input buffer size as
-                    // 6144 bits per [channel]. There are exceptions for a "low
-                    // sampling frequency enhancement channel" (aka the .1 in
-                    // 5.1) and "dependent coupling channel".
-                    // TODO: get those right. Security cameras tend to be mono
-                    // anyway though.
-                    let buffer_size_bytes = (6144 / 8) * u32::from(parsed.channels);
+                    // 6144 bits per NCC.
+                    let buffer_size_bytes = (6144 / 8) * u32::from(parsed.channels.ncc);
                     if buffer_size_bytes > 0xFF_FFFF {
                         bail!("unreasonable buffer_size_bytes={}", buffer_size_bytes);
                     }
@@ -244,7 +265,7 @@ fn get_mp4a_box(parsed: &AudioSpecificConfig, config: &[u8]) -> Result<Bytes, Er
                     buf.put_u8((buffer_size_bytes >> 16) as u8);
                     buf.put_u16(buffer_size_bytes as u16);
 
-                    let max_bitrate = (6144 / 1024) * u32::from(parsed.channels)
+                    let max_bitrate = (6144 / 1024) * u32::from(parsed.channels.ncc)
                         * u32::from(sampling_frequency);
                     buf.put_u32(max_bitrate);
 
@@ -502,10 +523,14 @@ mod tests {
     fn parse_audio_specific_config() {
         let dahua = super::AudioSpecificConfig::parse(&[0x11, 0x88]).unwrap();
         assert_eq!(dahua.sampling_frequency, 48_000);
-        assert_eq!(dahua.channels, 1);
+        assert_eq!(dahua.channels.name, "mono");
 
         let bunny = super::AudioSpecificConfig::parse(&[0x14, 0x90]).unwrap();
         assert_eq!(bunny.sampling_frequency, 12_000);
-        assert_eq!(bunny.channels, 2);
+        assert_eq!(bunny.channels.name, "stereo");
+
+        let rfc3640 = super::AudioSpecificConfig::parse(&[0x11, 0xB0]).unwrap();
+        assert_eq!(rfc3640.sampling_frequency, 48_000);
+        assert_eq!(rfc3640.channels.name, "5.1");
     }
 }
