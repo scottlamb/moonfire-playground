@@ -3,7 +3,9 @@ use failure::{Error, ResultExt, bail, format_err};
 use log::debug;
 use sdp::media_description::MediaDescription;
 use url::Url;
-use std::{convert::TryFrom, num::NonZeroU32};
+use std::{convert::TryFrom, num::NonZeroU16};
+
+use crate::client::Parameters;
 
 use super::{Presentation, Stream};
 
@@ -14,7 +16,7 @@ struct StaticPayloadType {
     encoding: &'static str,
     media: &'static str,
     clock_rate: u32,
-    channels: Option<NonZeroU32>,
+    channels: Option<NonZeroU16>,
 }
 
 /// All registered static payload types.
@@ -24,7 +26,7 @@ static STATIC_PAYLOAD_TYPES: [Option<StaticPayloadType>; 35] = [
         encoding: "PCMU",
         media: "audio",
         clock_rate: 8_000,
-        channels: NonZeroU32::new(1),
+        channels: NonZeroU16::new(1),
     }),
     /* 1 */ None, // reserved
     /* 2 */ None, // reserved
@@ -32,67 +34,67 @@ static STATIC_PAYLOAD_TYPES: [Option<StaticPayloadType>; 35] = [
         encoding: "GSM",
         media: "audio",
         clock_rate: 8_000,
-        channels: NonZeroU32::new(1),
+        channels: NonZeroU16::new(1),
     }),
     /* 4 */ Some(StaticPayloadType {
         encoding: "G723",
         media: "audio",
         clock_rate: 8_000,
-        channels: NonZeroU32::new(1),
+        channels: NonZeroU16::new(1),
     }),
     /* 5 */ Some(StaticPayloadType {
         encoding: "DVI4",
         media: "audio",
         clock_rate: 8_000,
-        channels: NonZeroU32::new(1),
+        channels: NonZeroU16::new(1),
     }),
     /* 6 */ Some(StaticPayloadType {
         encoding: "DVI4",
         media: "audio",
         clock_rate: 16_000,
-        channels: NonZeroU32::new(1),
+        channels: NonZeroU16::new(1),
     }),
     /* 7 */ Some(StaticPayloadType {
         encoding: "LPC",
         media: "audio",
         clock_rate: 8_000,
-        channels: NonZeroU32::new(1),
+        channels: NonZeroU16::new(1),
     }),
     /* 8 */ Some(StaticPayloadType {
         encoding: "PCMA",
         media: "audio",
         clock_rate: 8_000,
-        channels: NonZeroU32::new(1),
+        channels: NonZeroU16::new(1),
     }),
     /* 9 */ Some(StaticPayloadType {
         encoding: "G722",
         media: "audio",
         clock_rate: 8_000,
-        channels: NonZeroU32::new(1),
+        channels: NonZeroU16::new(1),
     }),
     /* 10 */ Some(StaticPayloadType {
         encoding: "L16",
         media: "audio",
         clock_rate: 441_000,
-        channels: NonZeroU32::new(2),
+        channels: NonZeroU16::new(2),
     }),
     /* 11 */ Some(StaticPayloadType {
         encoding: "L16",
         media: "audio",
         clock_rate: 441_000,
-        channels: NonZeroU32::new(1),
+        channels: NonZeroU16::new(1),
     }),
     /* 12 */ Some(StaticPayloadType {
         encoding: "QCELP",
         media: "audio",
         clock_rate: 8_000,
-        channels: NonZeroU32::new(1),
+        channels: NonZeroU16::new(1),
     }),
     /* 13 */ Some(StaticPayloadType {
         encoding: "CN",
         media: "audio",
         clock_rate: 8_000,
-        channels: NonZeroU32::new(1),
+        channels: NonZeroU16::new(1),
     }),
     /* 14 */ Some(StaticPayloadType {
         encoding: "MPA",
@@ -104,25 +106,25 @@ static STATIC_PAYLOAD_TYPES: [Option<StaticPayloadType>; 35] = [
         encoding: "G728",
         media: "audio",
         clock_rate: 8_000,
-        channels: NonZeroU32::new(1),
+        channels: NonZeroU16::new(1),
     }),
     /* 16 */ Some(StaticPayloadType {
         encoding: "DVI4",
         media: "audio",
         clock_rate: 11_025,
-        channels: NonZeroU32::new(1),
+        channels: NonZeroU16::new(1),
     }),
     /* 17 */ Some(StaticPayloadType {
         encoding: "DVI4",
         media: "audio",
         clock_rate: 22_050,
-        channels: NonZeroU32::new(1),
+        channels: NonZeroU16::new(1),
     }),
     /* 18 */ Some(StaticPayloadType {
         encoding: "G729",
         media: "audio",
         clock_rate: 8_000,
-        channels: NonZeroU32::new(1),
+        channels: NonZeroU16::new(1),
     }),
     /* 19 */ None, // reserved
     /* 20 */ None, // unassigned
@@ -208,6 +210,8 @@ pub(crate) fn split_once(str: &str, delimiter: char) -> Option<(&str, &str)> {
 /// On failure, returns an error which is expected to be supplemented with
 /// the [MediaDescription] debug string.
 fn parse_media(base_url: &Url, media_description: &MediaDescription) -> Result<Stream, Error> {
+    let media = media_description.media_name.media.clone();
+
     // https://tools.ietf.org/html/rfc8866#section-5.14 says "If the <proto>
     // sub-field is "RTP/AVP" or "RTP/SAVP" the <fmt> sub-fields contain RTP
     // payload type numbers."
@@ -270,7 +274,6 @@ fn parse_media(base_url: &Url, media_description: &MediaDescription) -> Result<S
     }
     let control = control.ok_or_else(|| format_err!("no control url"))?;
 
-    // TODO: allow statically assigned payload types.
     let encoding_name;
     let clock_rate;
     let channels;
@@ -286,9 +289,9 @@ fn parse_media(base_url: &Url, media_description: &MediaDescription) -> Result<S
             clock_rate = u32::from_str_radix(clock_rate_str, 10)
                 .map_err(|_| format_err!("bad clockrate in rtpmap"))?;
             channels = channels_str.map(|c| {
-                u32::from_str_radix(c, 10)
+                u16::from_str_radix(c, 10)
                     .ok()
-                    .and_then(NonZeroU32::new)
+                    .and_then(NonZeroU16::new)
                     .ok_or_else(|| format_err!("Invalid channels specification {:?}", c))
             }).transpose()?;
         },
@@ -301,15 +304,13 @@ fn parse_media(base_url: &Url, media_description: &MediaDescription) -> Result<S
             encoding_name = type_.encoding;
             clock_rate = type_.clock_rate;
             channels = type_.channels;
-            if type_.media != media_description.media_name.media {
-                bail!("SDP media type {} must match RTP payload type {:#?}",
-                      &media_description.media_name.media,
-                      type_);
+            if type_.media != media {
+                bail!("SDP media type {} must match RTP payload type {:#?}", &media, type_);
             }
         }
     }
 
-    let mut metadata = None;
+    let mut parameters = None;
 
     // https://tools.ietf.org/html/rfc6184#section-8.2.1
     if encoding_name == "H264" {
@@ -321,15 +322,21 @@ fn parse_media(base_url: &Url, media_description: &MediaDescription) -> Result<S
         // specify out-of-band parameters.
         let fmtp = fmtp.ok_or_else(|| format_err!(
             "expected out-of-band parameter set for H.264 stream"))?;
-        metadata = Some(crate::client::video::h264::Metadata::from_format_specific_params(fmtp)?);
+        parameters = Some(Parameters::H264(
+            crate::client::video::h264::Parameters::from_format_specific_params(fmtp)?));
+    } else if media == "audio" && encoding_name.eq_ignore_ascii_case("mpeg4-generic") {
+        let fmtp = fmtp.ok_or_else(|| format_err!(
+            "expected out-of-band parameter set for AAC stream"))?;
+        parameters = Some(Parameters::Aac(
+            crate::client::audio::aac::Parameters::from_format_specific_params(fmtp)?));
     }
 
     Ok(Stream {
-        media: media_description.media_name.media.clone(),
+        media,
         encoding_name: encoding_name.to_owned(),
         clock_rate,
         rtp_payload_type,
-        metadata,
+        parameters,
         control,
         channels,
         state: super::StreamState::Uninit,
@@ -493,13 +500,14 @@ pub(crate) fn parse_play(
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
+    use std::num::NonZeroU16;
 
     use bytes::Bytes;
     use failure::Error;
     use url::Url;
 
-    use crate::client::{StreamStateInit, video::Metadata};
+    use crate::client::{Parameters, StreamStateInit};
+    use crate::client::video::Parameters as _;
 
     use super::super::StreamState;
 
@@ -538,11 +546,15 @@ mod tests {
         assert_eq!(p.streams[0].encoding_name, "H264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
         assert_eq!(p.streams[0].clock_rate, 90_000);
-        let metadata = p.streams[0].metadata.as_ref().unwrap();
-        assert_eq!(metadata.rfc6381_codec(), "avc1.64001E");
-        assert_eq!(metadata.pixel_dimensions(), (704, 480));
-        assert_eq!(metadata.pixel_aspect_ratio(), None);
-        assert_eq!(metadata.frame_rate(), Some((2, 30)));
+        match p.streams[0].parameters.as_ref().unwrap() {
+            Parameters::H264(h264) => {
+                assert_eq!(h264.rfc6381_codec(), "avc1.64001E");
+                assert_eq!(h264.pixel_dimensions(), (704, 480));
+                assert_eq!(h264.pixel_aspect_ratio(), None);
+                assert_eq!(h264.frame_rate(), Some((2, 30)));
+            },
+            _ => panic!(),
+        }
 
         // .mp4 audio stream.
         assert_eq!(p.streams[1].control.as_str(), &(prefix.to_string() + "trackID=1"));
@@ -550,15 +562,18 @@ mod tests {
         assert_eq!(p.streams[1].encoding_name, "MPEG4-GENERIC");
         assert_eq!(p.streams[1].rtp_payload_type, 97);
         assert_eq!(p.streams[1].clock_rate, 48_000);
-        assert!(p.streams[1].metadata.is_none());
+        match p.streams[1].parameters {
+            Some(Parameters::Aac(_)) => {},
+            _ => panic!(),
+        }
 
-        // ONVIF metadata stream.
+        // ONVIF parameters stream.
         assert_eq!(p.streams[2].control.as_str(), &(prefix.to_string() + "trackID=4"));
         assert_eq!(p.streams[2].media, "application");
         assert_eq!(p.streams[2].encoding_name, "vnd.onvif.metadata");
         assert_eq!(p.streams[2].rtp_payload_type, 107);
         assert_eq!(p.streams[2].clock_rate, 90_000);
-        assert!(p.streams[2].metadata.is_none());
+        assert!(p.streams[2].parameters.is_none());
 
         // SETUP.
         let setup_response = response(include_bytes!("testdata/dahua_setup.txt"));
@@ -598,11 +613,11 @@ mod tests {
         assert_eq!(p.streams[0].media, "video");
         assert_eq!(p.streams[0].encoding_name, "H265");
         assert_eq!(p.streams[0].rtp_payload_type, 98);
-        assert!(p.streams[1].metadata.is_none());
+        assert!(p.streams[1].parameters.is_none());
         assert_eq!(p.streams[1].media, "audio");
         assert_eq!(p.streams[1].encoding_name, "PCMA");
         assert_eq!(p.streams[1].rtp_payload_type, 8);
-        assert!(p.streams[1].metadata.is_none());
+        assert!(p.streams[1].parameters.is_none());
     }
 
     #[test]
@@ -626,20 +641,24 @@ mod tests {
         assert_eq!(p.streams[0].encoding_name, "H264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
         assert_eq!(p.streams[0].clock_rate, 90_000);
-        let metadata = p.streams[0].metadata.as_ref().unwrap();
-        assert_eq!(metadata.rfc6381_codec(), "avc1.4D0029");
-        assert_eq!(metadata.pixel_dimensions(), (1920, 1080));
-        assert_eq!(metadata.pixel_aspect_ratio(), None);
-        assert_eq!(metadata.frame_rate(), Some((2_000, 60_000)));
+        match p.streams[0].parameters.as_ref().unwrap() {
+            Parameters::H264(h264) => {
+                assert_eq!(h264.rfc6381_codec(), "avc1.4D0029");
+                assert_eq!(h264.pixel_dimensions(), (1920, 1080));
+                assert_eq!(h264.pixel_aspect_ratio(), None);
+                assert_eq!(h264.frame_rate(), Some((2_000, 60_000)));
+            },
+            _ => panic!(),
+        }
 
-        // ONVIF metadata stream.
+        // ONVIF parameters stream.
         assert_eq!(p.streams[1].control.as_str(),
                    &(prefix.to_string() + "/trackID=3?transportmode=unicast&profile=Profile_1"));
         assert_eq!(p.streams[1].media, "application");
         assert_eq!(p.streams[1].encoding_name, "vnd.onvif.metadata");
         assert_eq!(p.streams[1].rtp_payload_type, 107);
         assert_eq!(p.streams[1].clock_rate, 90_000);
-        assert!(p.streams[1].metadata.is_none());
+        assert!(p.streams[1].parameters.is_none());
 
         // SETUP.
         let setup_response = response(include_bytes!("testdata/hikvision_setup.txt"));
@@ -686,11 +705,15 @@ mod tests {
         assert_eq!(p.streams[0].encoding_name, "H264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
         assert_eq!(p.streams[0].clock_rate, 90_000);
-        let metadata = p.streams[0].metadata.as_ref().unwrap();
-        assert_eq!(metadata.rfc6381_codec(), "avc1.640033");
-        assert_eq!(metadata.pixel_dimensions(), (2560, 1440));
-        assert_eq!(metadata.pixel_aspect_ratio(), None);
-        assert_eq!(metadata.frame_rate(), None);
+        match p.streams[0].parameters.as_ref().unwrap() {
+            Parameters::H264(h264) => {
+                assert_eq!(h264.rfc6381_codec(), "avc1.640033");
+                assert_eq!(h264.pixel_dimensions(), (2560, 1440));
+                assert_eq!(h264.pixel_aspect_ratio(), None);
+                assert_eq!(h264.frame_rate(), None);
+            },
+            _ => panic!(),
+        };
 
         // audio stream
         assert_eq!(p.streams[1].control.as_str(), &(base.to_string() + "trackID=2"));
@@ -698,7 +721,10 @@ mod tests {
         assert_eq!(p.streams[1].encoding_name, "MPEG4-GENERIC");
         assert_eq!(p.streams[1].rtp_payload_type, 97);
         assert_eq!(p.streams[1].clock_rate, 16_000);
-        assert!(p.streams[1].metadata.is_none());
+        match p.streams[1].parameters {
+            Some(Parameters::Aac(_)) => {},
+            _ => panic!(),
+        }
 
         // SETUP.
         let setup_response = response(include_bytes!("testdata/reolink_setup.txt"));
@@ -749,8 +775,11 @@ mod tests {
         assert_eq!(p.streams[0].encoding_name, "mpeg4-generic");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
         assert_eq!(p.streams[0].clock_rate, 12_000);
-        assert_eq!(p.streams[0].channels, NonZeroU32::new(2));
-        assert!(p.streams[0].metadata.is_none());
+        assert_eq!(p.streams[0].channels, NonZeroU16::new(2));
+        match p.streams[0].parameters {
+            Some(Parameters::Aac(_)) => {},
+            _ => panic!(),
+        }
 
         // H.264 video stream.
         assert_eq!(p.streams[1].control.as_str(), &(prefix.to_string() + "/trackID=2"));
@@ -758,11 +787,15 @@ mod tests {
         assert_eq!(p.streams[1].encoding_name, "H264");
         assert_eq!(p.streams[1].rtp_payload_type, 97);
         assert_eq!(p.streams[1].clock_rate, 90_000);
-        let metadata = p.streams[1].metadata.as_ref().unwrap();
-        assert_eq!(metadata.rfc6381_codec(), "avc1.42C01E");
-        assert_eq!(metadata.pixel_dimensions(), (240, 160));
-        assert_eq!(metadata.pixel_aspect_ratio(), None);
-        assert_eq!(metadata.frame_rate(), Some((2, 48)));
+        match p.streams[1].parameters.as_ref().unwrap() {
+            Parameters::H264(h264) => {
+                assert_eq!(h264.rfc6381_codec(), "avc1.42C01E");
+                assert_eq!(h264.pixel_dimensions(), (240, 160));
+                assert_eq!(h264.pixel_aspect_ratio(), None);
+                assert_eq!(h264.frame_rate(), Some((2, 48)));
+            },
+            _ => panic!(),
+        }
 
         // SETUP.
         let setup_response = response(include_bytes!("testdata/bunny_setup.txt"));
@@ -804,11 +837,15 @@ mod tests {
         assert_eq!(p.streams[0].encoding_name, "H264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
         assert_eq!(p.streams[0].clock_rate, 90_000);
-        let metadata = p.streams[0].metadata.as_ref().unwrap();
-        assert_eq!(metadata.rfc6381_codec(), "avc1.4D001F");
-        assert_eq!(metadata.pixel_dimensions(), (1280, 720));
-        assert_eq!(metadata.pixel_aspect_ratio(), None);
-        assert_eq!(metadata.frame_rate(), None);
+        match p.streams[0].parameters.as_ref().unwrap() {
+            Parameters::H264(h264) => {
+                assert_eq!(h264.rfc6381_codec(), "avc1.4D001F");
+                assert_eq!(h264.pixel_dimensions(), (1280, 720));
+                assert_eq!(h264.pixel_aspect_ratio(), None);
+                assert_eq!(h264.frame_rate(), None);
+            },
+            _ => panic!(),
+        }
 
         // audio stream
         assert_eq!(p.streams[1].control.as_str(), &(prefix.to_string() + "/track2"));
@@ -816,7 +853,7 @@ mod tests {
         assert_eq!(p.streams[1].encoding_name, "PCMU");
         assert_eq!(p.streams[1].rtp_payload_type, 0);
         assert_eq!(p.streams[1].clock_rate, 8_000);
-        assert_eq!(p.streams[1].channels, NonZeroU32::new(1));
-        assert!(p.streams[1].metadata.is_none());
+        assert_eq!(p.streams[1].channels, NonZeroU16::new(1));
+        assert!(p.streams[1].parameters.is_none());
     }
 }

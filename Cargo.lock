@@ -1063,11 +1063,13 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64",
+ "bitreader",
  "bytes",
  "digest_auth",
  "failure",
  "futures",
  "h264-reader 0.4.0 (git+https://github.com/dholroyd/h264-reader)",
+ "hex",
  "log",
  "mylog",
  "once_cell",

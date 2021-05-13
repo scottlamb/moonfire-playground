@@ -205,8 +205,8 @@ pub trait AccessUnitHandler {
 
 /// Produces [VideoHandler] events from [AccessUnitHandler] events.
 /// Currently this is a naïve implementation which assumes each access unit has a single slice.
-pub struct VideoAccessUnitHandler<V: VideoHandler<Metadata = Metadata>> {
-    metadata: Metadata,
+pub struct VideoAccessUnitHandler<V: VideoHandler<Parameters = Parameters>> {
+    parameters: Parameters,
     state: VideoState,
     inner: V,
 }
@@ -221,10 +221,10 @@ enum VideoState {
     SentPicture,
 }
 
-impl<V: VideoHandler<Metadata = Metadata> + Send> VideoAccessUnitHandler<V> {
-    pub fn new(metadata: Metadata, inner: V) -> Self {
+impl<V: VideoHandler<Parameters = Parameters> + Send> VideoAccessUnitHandler<V> {
+    pub fn new(parameters: Parameters, inner: V) -> Self {
         Self {
-            metadata,
+            parameters,
             state: VideoState::Unstarted,
             inner,
         }
@@ -236,7 +236,7 @@ impl<V: VideoHandler<Metadata = Metadata> + Send> VideoAccessUnitHandler<V> {
 }
 
 #[async_trait]
-impl<V: VideoHandler<Metadata = Metadata> + Send> AccessUnitHandler for VideoAccessUnitHandler<V> {
+impl<V: VideoHandler<Parameters = Parameters> + Send> AccessUnitHandler for VideoAccessUnitHandler<V> {
     async fn start(&mut self, _rtsp_ctx: &crate::Context, timestamp: crate::Timestamp) -> Result<(), Error> {
         if !matches!(self.state, VideoState::Unstarted) {
             bail!("access unit started in invalid state");
@@ -262,7 +262,7 @@ impl<V: VideoHandler<Metadata = Metadata> + Send> AccessUnitHandler for VideoAcc
                 if new_sps.is_some() {
                     bail!("multiple SPSs in access unit");
                 }
-                if nal != self.metadata.sps_nal() {
+                if nal != self.parameters.sps_nal() {
                     *new_sps = Some(nal);
                 }
             },
@@ -270,17 +270,17 @@ impl<V: VideoHandler<Metadata = Metadata> + Send> AccessUnitHandler for VideoAcc
                 if new_pps.is_some() {
                     bail!("multiple PPSs in access unit");
                 }
-                if nal != self.metadata.pps_nal() {
+                if nal != self.parameters.pps_nal() {
                     *new_pps = Some(nal);
                 }
             },
             UnitType::SliceLayerWithoutPartitioningIdr | UnitType::SliceLayerWithoutPartitioningNonIdr => {
                 if new_sps.is_some() || new_pps.is_some() {
-                    let sps_nal = new_sps.as_ref().map(|b| &b[..]).unwrap_or(self.metadata.sps_nal());
-                    let pps_nal = new_pps.as_ref().map(|b| &b[..]).unwrap_or(self.metadata.pps_nal());
-                    let new_metadata = Metadata::from_sps_and_pps(sps_nal, pps_nal)?;
-                    self.inner.metadata_change(&new_metadata).await?;
-                    self.metadata = new_metadata;
+                    let sps_nal = new_sps.as_ref().map(|b| &b[..]).unwrap_or(self.parameters.sps_nal());
+                    let pps_nal = new_pps.as_ref().map(|b| &b[..]).unwrap_or(self.parameters.pps_nal());
+                    let new_metadata = Parameters::from_sps_and_pps(sps_nal, pps_nal)?;
+                    self.inner.parameters_change(&new_metadata).await?;
+                    self.parameters = new_metadata;
                 }
                 let rtp_timestamp = *timestamp;
                 self.state = VideoState::SentPicture;
@@ -329,7 +329,7 @@ impl SeiIncrementalPayloadReader for HeaderPrinter {
 }
 
 impl PrintAccessUnitHandler {
-    pub fn new(metadata: &Metadata) -> Result<Self, Error> {
+    pub fn new(metadata: &Parameters) -> Result<Self, Error> {
         let config = h264_reader::avcc::AvcDecoderConfigurationRecord::try_from(&metadata.avc_decoder_config[..])
             .map_err(|e| format_err!("{:?}", e))?;
         let ctx = config.create_context(())
@@ -393,7 +393,7 @@ fn decode(encoded: &[u8]) -> Vec<u8> {
 }
 
 #[derive(Clone)]
-pub struct Metadata {
+pub struct Parameters {
     pixel_dimensions: (u32, u32),
     rfc6381_codec: String,
     pixel_aspect_ratio: Option<(u32, u32)>,
@@ -407,10 +407,10 @@ pub struct Metadata {
     pps_nal: std::ops::Range<usize>,
 }
 
-impl std::fmt::Debug for Metadata {
+impl std::fmt::Debug for Parameters {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use pretty_hex::PrettyHex;
-        f.debug_struct("Metadata")
+        f.debug_struct("h264::Parameters")
          .field("rfc6381_codec", &self.rfc6381_codec)
          .field("pixel_dimensions", &self.pixel_dimensions)
          .field("pixel_aspect_ratio", &self.pixel_aspect_ratio)
@@ -420,7 +420,7 @@ impl std::fmt::Debug for Metadata {
     }
 }
 
-impl Metadata {
+impl Parameters {
     /// Parses metadata from the `format-specific-params` of a SDP `fmtp` media attribute.
     pub fn from_format_specific_params(format_specific_params: &str) -> Result<Self, Error> {
         let mut sprop_parameter_sets = None;
@@ -515,7 +515,7 @@ impl Metadata {
                 frame_rate = None;
             },
         }
-        Ok(Metadata {
+        Ok(Parameters {
             avc_decoder_config,
             pixel_dimensions,
             rfc6381_codec,
@@ -539,7 +539,7 @@ impl Metadata {
     }
 }
 
-impl super::Metadata for Metadata {
+impl super::Parameters for Parameters {
     fn pixel_dimensions(&self) -> (u32, u32) {
         self.pixel_dimensions
     }

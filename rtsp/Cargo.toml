@@ -9,10 +9,12 @@ edition = "2018"
 [dependencies]
 async-trait = "0.1.48"
 base64 = "0.13.0"
+bitreader = "0.3.3"
 bytes = "1.0.1"
 digest_auth = "0.2.4"
 failure = "0.1.8"
 futures = "0.3.14"
+hex = "0.4.3"
 #h264-reader = "0.4.0"
 #h264-reader = { git = "https://github.com/scottlamb/h264-reader", branch = "more-public-fields" }
 h264-reader = { git = "https://github.com/dholroyd/h264-reader" }

@@ -5,12 +5,12 @@ pub mod h264;
 
 #[async_trait]
 pub trait VideoHandler {
-    type Metadata : Metadata;
-    async fn metadata_change(&mut self, metadata: &Self::Metadata) -> Result<(), Error>;
+    type Parameters : Parameters;
+    async fn parameters_change(&mut self, parameters: &Self::Parameters) -> Result<(), Error>;
     async fn picture(&mut self, picture: Picture) -> Result<(), Error>;
 }
 
-pub trait Metadata : Clone + std::fmt::Debug {
+pub trait Parameters : Clone + std::fmt::Debug {
     /// Returns a codec description in
     /// [RFC-6381](https://tools.ietf.org/html/rfc6381) form, eg `avc1.4D401E`.
     // TODO: use https://github.com/dholroyd/rfc6381-codec crate once published?

@@ -1,6 +1,6 @@
 //! Proof-of-concept `.mp4` writer.
 //!
-//! This writes media data (`mdat`) to a stream, buffering metadata for a
+//! This writes media data (`mdat`) to a stream, buffering parameters for a
 //! `moov` atom at the end. This avoids the need to buffer the media data
 //! (`mdat`) first or reserved a fixed size for the `moov`, but it will slow
 //! playback, particularly when serving `.mp4` files remotely.
@@ -14,9 +14,9 @@ use async_trait::async_trait;
 use bytes::{Buf, BufMut, BytesMut};
 use failure::{Error, bail, format_err};
 use log::info;
-use moonfire_rtsp::client::{rtp::PacketHandler, video::{Metadata, VideoHandler, h264}};
+use moonfire_rtsp::client::{rtp::PacketHandler, video::{Parameters, VideoHandler, h264}};
 
-use std::convert::TryFrom;
+use std::{convert::TryFrom, io::Write};
 use std::io::SeekFrom;
 use std::path::PathBuf;
 use tokio::io::{AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
@@ -53,7 +53,7 @@ async fn write_all_buf<W: AsyncWrite + Unpin, B: Buf>(writer: &mut W, buf: &mut 
 pub struct Mp4Writer<W: AsyncWrite + AsyncSeek + Send + Unpin> {
     mdat_start: u32,
     mdat_len: u32,
-    metadata: moonfire_rtsp::client::video::h264::Metadata,
+    parameters: moonfire_rtsp::client::video::h264::Parameters,
     last_pts: Option<u64>,
 
     /// Differences between pairs of pts, in timescale units.
@@ -73,7 +73,7 @@ pub struct Mp4Writer<W: AsyncWrite + AsyncSeek + Send + Unpin> {
 }
 
 impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
-    pub async fn new(metadata: moonfire_rtsp::client::video::h264::Metadata, mut inner: W) -> Result<Self, Error> {
+    pub async fn new(parameters: moonfire_rtsp::client::video::h264::Parameters, mut inner: W) -> Result<Self, Error> {
         let mut buf = BytesMut::new();
         write_box!(&mut buf, b"ftyp", {
             buf.extend_from_slice(&[
@@ -87,7 +87,7 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
         write_all_buf(&mut inner, &mut buf).await?;
         Ok(Mp4Writer {
             inner,
-            metadata,
+            parameters,
             last_pts: None,
             durations: Vec::new(),
             tot_duration: 0,
@@ -143,7 +143,7 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
                     for v in &[0x00010000,0,0,0,0x00010000,0,0,0,0x40000000] {
                         buf.put_u32(*v);        // matrix
                     }
-                    let dims = self.metadata.pixel_dimensions();
+                    let dims = self.parameters.pixel_dimensions();
                     let width = u32::from(u16::try_from(dims.0)?) << 16;
                     let height = u32::from(u16::try_from(dims.1)?) << 16;
                     buf.put_u32(width);
@@ -187,7 +187,7 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
                             write_box!(&mut buf, b"stsd", {
                                 buf.put_u32(0); // version
                                 buf.put_u32(1); // entry_count
-                                self.write_video_sample_entry(&mut buf, &self.metadata)?;
+                                self.write_video_sample_entry(&mut buf, &self.parameters)?;
                             });
                             let samples = u32::try_from(self.durations.len())?;
                             write_box!(&mut buf, b"stts", {
@@ -236,13 +236,13 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
         Ok(())
     }
 
-    fn write_video_sample_entry(&self, buf: &mut BytesMut, metadata: &h264::Metadata) -> Result<(), Error> {
+    fn write_video_sample_entry(&self, buf: &mut BytesMut, parameters: &h264::Parameters) -> Result<(), Error> {
         write_box!(buf, b"avc1", {
             buf.put_u32(0);
             buf.put_u32(1); // data_reference_index = 1
             buf.extend_from_slice(&[0; 16]);
-            buf.put_u16(u16::try_from(metadata.pixel_dimensions().0)?);
-            buf.put_u16(u16::try_from(metadata.pixel_dimensions().1)?);
+            buf.put_u16(u16::try_from(parameters.pixel_dimensions().0)?);
+            buf.put_u16(u16::try_from(parameters.pixel_dimensions().1)?);
             buf.extend_from_slice(&[
                 0x00, 0x48, 0x00, 0x00, // horizresolution
                 0x00, 0x48, 0x00, 0x00, // vertresolution
@@ -259,7 +259,7 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
                 0x00, 0x18, 0xff, 0xff, // depth + pre_defined
             ]);
             write_box!(buf, b"avcC", {
-                buf.extend_from_slice(metadata.avc_decoder_config());
+                buf.extend_from_slice(parameters.avc_decoder_config());
             });
         });
         Ok(())
@@ -268,10 +268,10 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
 
 #[async_trait]
 impl<W: AsyncWrite + AsyncSeek + Send + Unpin> VideoHandler for Mp4Writer<W> {
-    type Metadata = moonfire_rtsp::client::video::h264::Metadata;
+    type Parameters = moonfire_rtsp::client::video::h264::Parameters;
 
-    async fn metadata_change(&mut self, metadata: &Self::Metadata) -> Result<(), failure::Error> {
-        bail!("metadata change unimplemented. new metadata: {:#?}", metadata)
+    async fn parameters_change(&mut self, parameters: &Self::Parameters) -> Result<(), failure::Error> {
+        bail!("parameters change unimplemented. new parameters: {:#?}", parameters)
     }
 
     async fn picture(&mut self, mut picture: moonfire_rtsp::client::video::Picture) -> Result<(), failure::Error> {
@@ -302,16 +302,19 @@ pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credential
     let video_stream_i = session.streams().iter()
         .position(|s| s.media == "video")
         .ok_or_else(|| format_err!("couldn't find video stream"))?;
-    let video_metadata = session.streams()[video_stream_i].metadata.as_ref().unwrap().clone();
-    info!("video metadata: {:#?}", &video_metadata);
+    let video_parameters = match session.streams()[video_stream_i].parameters.as_ref() {
+        Some(moonfire_rtsp::client::Parameters::H264(h264)) => h264.clone(),
+        _ => panic!(),
+    };
+    info!("video parameters: {:#?}", &video_parameters);
     session.setup(video_stream_i).await?;
     let session = session.play().await?;
 
     // Read RTP data.
     let out = tokio::fs::File::create(out).await?;
-    let mp4_vid = Mp4Writer::new(video_metadata.clone(), out).await?;
-    let to_vid = moonfire_rtsp::client::video::h264::VideoAccessUnitHandler::new(video_metadata.clone(), mp4_vid);
-    //let mut print_au = moonfire_rtsp::client::video::h264::PrintAccessUnitHandler::new(&video_metadata)?;
+    let mp4_vid = Mp4Writer::new(video_parameters.clone(), out).await?;
+    let to_vid = moonfire_rtsp::client::video::h264::VideoAccessUnitHandler::new(video_parameters.clone(), mp4_vid);
+    //let mut print_au = moonfire_rtsp::client::video::h264::PrintAccessUnitHandler::new(&video_parameters)?;
     let mut h264 = moonfire_rtsp::client::video::h264::Handler::new(to_vid);
 
     tokio::pin!(session);

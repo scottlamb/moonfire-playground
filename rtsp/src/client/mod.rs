@@ -1,4 +1,4 @@
-use std::{fmt::Debug, num::{NonZeroU32, NonZeroU8}, pin::Pin};
+use std::{fmt::Debug, num::{NonZeroU16, NonZeroU8}, pin::Pin};
 
 use bytes::Bytes;
 use failure::{Error, bail, format_err};
@@ -12,6 +12,7 @@ use url::Url;
 use crate::{Context, Timestamp};
 
 pub mod application;
+pub mod audio;
 mod parse;
 pub mod rtcp;
 pub mod rtp;
@@ -60,20 +61,23 @@ pub struct Stream {
     pub clock_rate: u32,
 
     /// Number of audio channels, if applicable (`media` is `audio`) and known.
-    pub channels: Option<NonZeroU32>,
+    pub channels: Option<NonZeroU16>,
 
-    /// The metadata, if of a known codec type.
-    /// Currently the only supported codec is H.264. This will be extended to
-    /// be an enum or something.
-    pub metadata: Option<crate::client::video::h264::Metadata>,
+    /// The parameters, if supplied and of a known codec type.
+    pub parameters: Option<Parameters>,
 
     /// The specified control URL.
     /// This is needed to send `SETUP` requests and interpret the `PLAY`
     /// response's `RTP-Info` header.
     pub control: Url,
 
-
     state: StreamState,
+}
+
+#[derive(Debug)]
+pub enum Parameters {
+    H264(video::h264::Parameters),
+    Aac(audio::aac::Parameters),
 }
 
 #[derive(Debug)]
