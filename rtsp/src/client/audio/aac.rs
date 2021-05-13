@@ -11,17 +11,22 @@
 //!         ISO base media file format.
 //!     *   ISO/IEC 14496-14: MP4 File Format.
 
-use bytes::{BufMut, Bytes, BytesMut};
+use async_trait::async_trait;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use failure::{Error, bail, format_err};
+use log::trace;
 use pretty_hex::PrettyHex;
-use std::convert::TryFrom;
+use std::{convert::TryFrom, fmt::Debug};
+
+use crate::client::rtp::PacketHandler;
 
 /// An AudioSpecificConfig as in ISO/IEC 14496-3 section 1.6.2.1.
 /// Currently just a few fields of interest.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct AudioSpecificConfig {
     /// See ISO/IEC 14496-3 Table 1.3.
     audio_object_type: u8,
+    frame_length: u32,
     sampling_frequency: u32,
     channels: u8,
 }
@@ -35,7 +40,7 @@ impl AudioSpecificConfig {
             o => o,
         };
 
-        // 1.6.3.4.
+        // ISO/IEC 14496-3 section 1.6.3.4.
         let sampling_frequency = match r.read_u8(4)? {
             0x0 => 96_000,
             0x1 => 88_200,
@@ -59,8 +64,36 @@ impl AudioSpecificConfig {
             v @ 8..=15 => bail!("reserved channelConfiguration value 0x{:x}", v),
             _ => unreachable!(),
         };
+        if audio_object_type == 5 || audio_object_type == 29 {
+            // extensionSamplingFrequencyIndex + extensionSamplingFrequency.
+            if r.read_u8(4)? == 0xf {
+                r.skip(24)?;
+            }
+            // audioObjectType (a different one) + extensionChannelConfiguration.
+            if r.read_u8(5)? == 22 {
+                r.skip(4)?;
+            }
+        }
+
+        // The supported types here are the ones that use GASpecificConfig.
+        match audio_object_type {
+            1 | 2 | 3 | 4 | 6 | 7 | 17 | 19 | 20 | 21 | 22 | 23 => {},
+            o => bail!("unsupported audio_object_type {}", o),
+        }
+
+        // GASpecificConfig, ISO/IEC 14496-3 section 4.4.1.
+        let frame_length = match (audio_object_type, r.read_bool()?) {
+            (3 /* AAC SR */, false) => 256,
+            (3 /* AAC SR */, true) => bail!("frame_length_flag must be false for AAC SSR"),
+            (23 /* ER AAC LD */, false) => 512,
+            (23 /* ER AAC LD */, true) => 480,
+            (_, false) => 1024,
+            (_, true) => 960,
+        };
+
         Ok(AudioSpecificConfig {
             audio_object_type,
+            frame_length,
             sampling_frequency,
             channels,
         })
@@ -235,6 +268,7 @@ fn get_mp4a_box(parsed: &AudioSpecificConfig, config: &[u8]) -> Result<Bytes, Er
     Ok(buf.freeze())
 }
 
+#[derive(Clone)]
 pub struct Parameters {
     config: AudioSpecificConfig,
     rfc6381_codec: String,
@@ -243,23 +277,53 @@ pub struct Parameters {
 
 impl Parameters {
     /// Parses metadata from the `format-specific-params` of a SDP `fmtp` media attribute.
+    /// The metadata is defined in [RFC 3640 section
+    /// 4.1](https://datatracker.ietf.org/doc/html/rfc3640#section-4.1).
     pub fn from_format_specific_params(format_specific_params: &str) -> Result<Self, Error> {
         let mut mode = None;
         let mut config = None;
+        let mut size_length = None;
+        let mut index_length = None;
+        let mut index_delta_length = None;
         for p in format_specific_params.split(';') {
-            if let Some(c) = p.strip_prefix("config=") {
-                config = Some(hex::decode(c)
-                    .map_err(|_| format_err!("config has invalid hex encoding"))?);
-            } else if let Some(m) = p.strip_prefix("mode=") {
-                mode = Some(m);
+            let p = p.trim();
+            if p == "" {
+                // Reolink cameras leave a trailing ';'.
+                continue;
+            }
+            let (key, value) = crate::client::parse::split_once(p, '=')
+                .ok_or_else(|| format_err!("bad format-specific-param {}", p))?;
+            match &key.to_ascii_lowercase()[..] {
+                "config" => {
+                    config = Some(hex::decode(value)
+                        .map_err(|_| format_err!("config has invalid hex encoding"))?);
+                },
+                "mode" => mode = Some(value),
+                "sizelength" => {
+                    size_length = Some(u16::from_str_radix(value, 10)
+                        .map_err(|_| format_err!("bad sizeLength"))?);
+                },
+                "indexlength" => {
+                    index_length = Some(u16::from_str_radix(value, 10)
+                        .map_err(|_| format_err!("bad indexLength"))?);
+                },
+                "indexdeltalength" => {
+                    index_delta_length = Some(u16::from_str_radix(value, 10)
+                        .map_err(|_| format_err!("bad indexDeltaLength"))?);
+                },
+                _ => {},
             }
         }
-        // https://datatracker.ietf.org/doc/html/rfc3640#section-3.3.5 AAC-lbr
         // https://datatracker.ietf.org/doc/html/rfc3640#section-3.3.6 AAC-hbr
-        if !matches!(mode, Some(m) if m == "AAC-hbr" || m == "AAC-lbr") {
-            bail!("Expected mode AAC-hbr or AAC-lbr, got {:#?}", mode);
+        if mode != Some("AAC-hbr") {
+            bail!("Expected mode AAC-hbr, got {:#?}", mode);
         }
-        let config = config.ok_or_else(|| format_err!("expected config in format-specific-params"))?;
+        let config = config.ok_or_else(|| format_err!("config must be specified"))?;
+        if size_length != Some(13) || index_length != Some(3) || index_delta_length != Some(3) {
+            bail!("Unexpected sizeLength={:?} indexLength={:?} indexDeltaLength={:?}",
+                  size_length, index_length, index_delta_length);
+        }
+
         let parsed = AudioSpecificConfig::parse(&config[..])?;
         let sample_entry = get_mp4a_box(&parsed, &config[..])?;
 
@@ -284,6 +348,151 @@ impl std::fmt::Debug for Parameters {
          .field("rfc6381_codec", &self.rfc6381_codec)
          .field("sample_entry", &self.sample_entry.hex_dump())
          .finish()
+    }
+}
+
+#[async_trait]
+pub trait FrameHandler {
+    async fn frame(&mut self, frame: Frame) -> Result<(), Error>;
+}
+
+pub struct Frame {
+    pub timestamp: crate::Timestamp,
+    pub data: Bytes,
+}
+
+impl Debug for Frame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("aac::Frame")
+         .field("timestamp", &self.timestamp)
+         .field("data", &self.data.hex_dump())
+         .finish()
+    }
+}
+
+pub struct Handler<F> {
+    params: Parameters,
+    frag: Option<Fragment>,
+    inner: F,
+}
+
+struct Fragment {
+    rtp_timestamp: u16,
+    size: u16,
+    buf: BytesMut,
+}
+
+impl<F> Handler<F> {
+    pub fn new(params: Parameters, inner: F) -> Self {
+        Self {
+            params,
+            frag: None,
+            inner,
+         }
+    }
+}
+
+#[async_trait]
+impl<F: FrameHandler + Send> PacketHandler for Handler<F> {
+    async fn pkt(&mut self, mut pkt: crate::client::rtp::Packet) -> Result<(), Error> {
+        // Read the AU headers.
+        if pkt.payload.len() < 2 {
+            bail!("packet too short for au-header-length");
+        }
+        let au_headers_length_bits = pkt.payload.get_u16();
+
+        // AAC-hbr requires 16-bit AU headers: 13-bit size, 3-bit index.
+        if (au_headers_length_bits & 0x7) != 0 {
+            bail!("bad au-headers-length {}", au_headers_length_bits);
+        }
+        let au_headers_count = usize::from(au_headers_length_bits >> 4);
+        let mut data_off = au_headers_count << 1;
+        if pkt.payload.len() < (au_headers_count << 1) {
+            bail!("packet too short for au-headers");
+        }
+        if let Some(mut frag) = self.frag.take() { // fragment in progress.
+            if au_headers_count != 1 {
+                bail!("Got {}-AU packet while fragment in progress");
+            }
+            if (pkt.timestamp.timestamp as u16) != frag.rtp_timestamp {
+                bail!("Timestamp changed from 0x{:04x} to 0x{:04x} mid-fragment",
+                      frag.rtp_timestamp, pkt.timestamp.timestamp as u16);
+            }
+            let au_header = u16::from_be_bytes([pkt.payload[0], pkt.payload[1]]);
+            let size = usize::from(au_header >> 3);
+            if size != usize::from(frag.size) {
+                bail!("size changed {}->{} mid-fragment", frag.size, size);
+            }
+            let data = &pkt.payload[data_off..];
+            match (frag.buf.len() + data.len()).cmp(&size) {
+                std::cmp::Ordering::Less => {
+                    if pkt.mark {
+                        bail!("frag marked complete when {}+{}<{}", frag.buf.len(), data.len(), size);
+                    }
+                    self.frag = Some(frag);
+                },
+                std::cmp::Ordering::Equal => {
+                    if !pkt.mark {
+                        bail!("frag not marked complete when full data present");
+                    }
+                    frag.buf.extend_from_slice(data);
+                    println!("au {}: len-{}, fragmented", &pkt.timestamp, size);
+                    self.inner.frame(Frame {
+                        timestamp: pkt.timestamp,
+                        data: frag.buf.freeze(),
+                    }).await?;
+                },
+                std::cmp::Ordering::Greater => bail!("too much data in fragment"),
+            }
+            return Ok(());
+        }
+        for i in 0..au_headers_count {
+            let au_header = u16::from_be_bytes([pkt.payload[i << 1], pkt.payload[(i << 1) + 1]]);
+            let size = usize::from(au_header >> 3);
+            let index = au_header & 0b111;
+            if index != 0 {
+                // First AU's index must be zero; subsequent AU's deltas > 1
+                // indicate interleaving, which we don't support.
+                // TODO: https://datatracker.ietf.org/doc/html/rfc3640#section-3.3.6
+                // says "receivers MUST support de-interleaving".
+                bail!("interleaving not yet supported");
+            }
+            if size > pkt.payload.len() - data_off { // start of fragment
+                if au_headers_count != 1 {
+                    bail!("fragmented AUs must not share packets");
+                }
+                if pkt.mark {
+                    bail!("mark can't be set on beginning of fragment");
+                }
+                let mut buf = BytesMut::with_capacity(size);
+                buf.extend_from_slice(&pkt.payload[data_off..]);
+                self.frag = Some(Fragment {
+                    rtp_timestamp: pkt.timestamp.timestamp as u16,
+                    size: size as u16,
+                    buf,
+                });
+                return Ok(());
+            }
+            if !pkt.mark {
+                bail!("mark must be set on non-fragmented au");
+            }
+            self.inner.frame(Frame {
+                timestamp: pkt.timestamp.try_add(self.params.config.frame_length)?,
+                data: pkt.payload.slice(data_off..data_off+size),
+            }).await?;
+            data_off += size;
+        }
+        if data_off < pkt.payload.len() {
+            bail!("extra data at end of packet");
+        }
+        Ok(())
+    }
+
+    async fn end(&mut self) -> Result<(), Error> {
+        if self.frag.is_some() {
+            bail!("stream ended mid-fragment");
+        }
+        Ok(())
     }
 }
 

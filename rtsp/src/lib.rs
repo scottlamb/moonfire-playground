@@ -1,8 +1,9 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use failure::bail;
+use failure::{Error, bail, format_err};
 use once_cell::sync::Lazy;
 use rtsp_types::Message;
-use std::{convert::TryFrom, fmt::{Debug, Display}};
+use std::convert::TryFrom;
+use std::fmt::{Debug, Display};
 
 pub mod client;
 
@@ -69,6 +70,15 @@ impl Timestamp {
     #[inline]
     pub fn elapsed_secs(&self) -> f64 {
         (self.elapsed() as f64) / (self.clock_rate as f64)
+    }
+
+    pub fn try_add(&self, delta: u32) -> Result<Self, Error> {
+        Ok(Timestamp {
+            timestamp: self.timestamp.checked_add(u64::from(delta))
+                .ok_or_else(|| format_err!("overflow on {:?} + {}", &self, delta))?,
+            clock_rate: self.clock_rate,
+            start: self.start,
+        })
     }
 }
 

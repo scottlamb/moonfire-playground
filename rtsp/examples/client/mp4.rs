@@ -14,9 +14,9 @@ use async_trait::async_trait;
 use bytes::{Buf, BufMut, BytesMut};
 use failure::{Error, bail, format_err};
 use log::info;
-use moonfire_rtsp::client::{rtp::PacketHandler, video::{Parameters, VideoHandler, h264}};
+use moonfire_rtsp::client::{audio::aac::FrameHandler, rtp::PacketHandler, video::{Parameters, VideoHandler, h264}};
 
-use std::{convert::TryFrom, io::Write};
+use std::convert::TryFrom;
 use std::io::SeekFrom;
 use std::path::PathBuf;
 use tokio::io::{AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
@@ -281,7 +281,7 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> VideoHandler for Mp4Writer<W> {
             self.durations.push(u32::try_from(duration)?);
             self.tot_duration += duration;
         }
-        info!("{}-byte picture", picture.remaining());
+        println!("{}: {}-byte picture", &picture.rtp_timestamp, picture.remaining());
         self.sizes.push(u32::try_from(picture.remaining())?);
         if picture.is_random_access_point {
             self.sync_sample_nums.push(u32::try_from(self.sizes.len())?);
@@ -294,10 +294,18 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> VideoHandler for Mp4Writer<W> {
     }
 }
 
+struct FH;
+
+#[async_trait]
+impl FrameHandler for FH {
+    async fn frame(&mut self, frame: moonfire_rtsp::client::audio::aac::Frame) -> Result<(), Error> {
+        println!("{}: {}-byte audio frame", &frame.timestamp, &frame.data.len());
+        Ok(())
+    }
+}
+
 pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credentials>, out: PathBuf) -> Result<(), Error> {
     let stop = tokio::signal::ctrl_c();
-
-    // DESCRIBE. https://tools.ietf.org/html/rfc2326#section-10.2
     let mut session = moonfire_rtsp::client::Session::describe(url, credentials).await?;
     let video_stream_i = session.streams().iter()
         .position(|s| s.media == "video")
@@ -307,7 +315,19 @@ pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credential
         _ => panic!(),
     };
     info!("video parameters: {:#?}", &video_parameters);
+    let audio_stream_i = session.streams().iter()
+        .position(|s| s.media == "audio" && s.parameters.is_some());
     session.setup(video_stream_i).await?;
+    let mut aac = None;
+    if let Some(i) = audio_stream_i {
+        session.setup(i).await?;
+        let params = match session.streams()[i].parameters.as_ref() {
+            Some(moonfire_rtsp::client::Parameters::Aac(aac)) => aac.clone(),
+            _ => panic!(),
+        };
+        info!("audio parameters: {:#?}", &params);
+        aac = Some(moonfire_rtsp::client::audio::aac::Handler::new(params, FH));
+    }
     let session = session.play().await?;
 
     // Read RTP data.
@@ -323,7 +343,11 @@ pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credential
         tokio::select! {
             pkt = session.as_mut().next() => {
                 let pkt = pkt.ok_or_else(|| format_err!("EOF"))??;
-                h264.pkt(pkt).await?;
+                if pkt.stream_id == video_stream_i {
+                    h264.pkt(pkt).await?;
+                } else if Some(pkt.stream_id) == audio_stream_i {
+                    aac.as_mut().unwrap().pkt(pkt).await?;
+                }
             },
             _ = &mut stop => {
                 break;
