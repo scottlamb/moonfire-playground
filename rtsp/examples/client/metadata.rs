@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use failure::{Error, format_err};
+use futures::StreamExt;
 use log::info;
-use moonfire_rtsp::client::{application::onvif::MessageHandler, rtp::PacketHandler};
+use moonfire_rtsp::client::{PacketItem, application::onvif::MessageHandler};
 use rtsp_types::Url;
 
 struct MessagePrinter;
@@ -23,7 +24,7 @@ pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credential
         .position(|s| s.media == "application" && s.encoding_name == "vnd.onvif.metadata")
         .ok_or_else(|| format_err!("couldn't find onvif stream"))?;
     session.setup(onvif_stream_i).await?;
-    let session = session.play().await?;
+    let session = session.play().await?.pkts();
 
     // Read RTP data.
     let mut onvifer = moonfire_rtsp::client::application::onvif::Handler::new(MessagePrinter);
@@ -31,8 +32,11 @@ pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credential
     tokio::pin!(stop);
     loop {
         tokio::select! {
-            pkt = session.as_mut().next() => {
-                let pkt = pkt.ok_or_else(|| format_err!("EOF"))??;
+            pkt = session.next() => {
+                let pkt = match pkt.ok_or_else(|| format_err!("EOF"))?? {
+                    PacketItem::RtpPacket(p) => p,
+                    PacketItem::SenderReport(_) => continue,
+                };
                 onvifer.pkt(pkt).await?;
             },
             _ = &mut stop => {

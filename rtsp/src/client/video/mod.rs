@@ -1,14 +1,4 @@
-use async_trait::async_trait;
-use failure::Error;
-
 pub mod h264;
-
-#[async_trait]
-pub trait VideoHandler {
-    type Parameters : Parameters;
-    async fn parameters_change(&mut self, parameters: &Self::Parameters) -> Result<(), Error>;
-    async fn picture(&mut self, picture: Picture) -> Result<(), Error>;
-}
 
 pub trait Parameters : Clone + std::fmt::Debug {
     /// Returns a codec description in
@@ -45,6 +35,8 @@ pub struct Picture {
     /// This picture's timestamp in the time base associated with the stream.
     pub rtp_timestamp: crate::Timestamp,
 
+    pub stream_id: usize,
+
     /// If this is a "random access point (RAP)" aka "instantaneous decoding refresh (IDR)" picture.
     /// The former is defined in ISO/IEC 14496-12; the latter in H.264. Both mean that this picture
     /// can be decoded without any other AND no pictures following this one depend on any pictures
@@ -69,7 +61,7 @@ pub struct Picture {
 impl std::fmt::Debug for Picture {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         //use pretty_hex::PrettyHex;
-        f.debug_struct("Frame")
+        f.debug_struct("Picture")
          .field("rtp_timestamp", &self.rtp_timestamp)
          .field("is_random_access_point", &self.is_random_access_point)
          .field("is_disposable", &self.is_disposable)

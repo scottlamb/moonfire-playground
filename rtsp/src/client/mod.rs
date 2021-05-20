@@ -1,11 +1,13 @@
 use std::{fmt::Debug, num::{NonZeroU16, NonZeroU8}, pin::Pin};
 
+use async_stream::try_stream;
 use bytes::Bytes;
 use failure::{Error, bail, format_err};
 use futures::{SinkExt, StreamExt};
 use log::{debug, trace, warn};
 use pin_project::pin_project;
 use sdp::session_description::SessionDescription;
+use tokio::pin;
 use tokio_util::codec::Framed;
 use url::Url;
 
@@ -553,7 +555,70 @@ impl Session<Described> {
     }
 }
 
+pub enum PacketItem {
+    RtpPacket(rtp::Packet),
+    SenderReport(rtp::SenderReport),
+}
+
+pub(crate) trait Demuxer {
+    fn push(&mut self, input: rtp::Packet) -> Result<(), Error>;
+    fn pull(&mut self) -> Result<Option<DemuxedItem>, Error>;
+}
+
+pub enum DemuxedItem {
+    ParameterChange(video::h264::Parameters),
+    Picture(video::Picture),
+    AudioFrame(audio::aac::Frame),
+    SenderReport(rtp::SenderReport),
+}
+
 impl Session<Playing> {
+    /// Returns a stream of packets.
+    pub fn pkts(self) -> impl futures::Stream<Item = Result<PacketItem, Error>> {
+        try_stream! {
+            let self_ = self;
+            tokio::pin!(self_);
+            while let Some(pkt) = self_.as_mut().next().await {
+                let pkt = pkt?;
+                yield pkt;
+            }
+        }
+    }
+
+    pub fn demuxed(mut self) -> Result<impl futures::Stream<Item = Result<DemuxedItem, Error>>, Error> {
+        let mut demuxers: Vec<Option<Box<dyn Demuxer>>> =
+            self.state.presentation.streams
+            .iter_mut()
+            .map(|s| match s.state {
+                StreamState::Playing{..} => {
+                    match s.parameters.take() {
+                        None => bail!("no demuxer for {} stream", s.encoding_name),
+                        Some(Parameters::H264(h264)) => Ok(Some(video::h264::Demuxer::new(h264))),
+                        Some(Parameters::Aac(aac)) => Ok(Some(audio::aac::Demuxer::new(aac))),
+                    }
+                },
+                _ => Ok(None),
+            })
+            .collect::<Result<_, Error>>()?;
+        Ok(try_stream! {
+            let self_ = self;
+            tokio::pin!(self_);
+            while let Some(pkt) = self_.as_mut().next().await {
+                let pkt = pkt?;
+                match pkt {
+                    PacketItem::RtpPacket(p) => {
+                        let demuxer = demuxers[p.stream_id].as_mut().unwrap();
+                        demuxer.push(p)?;
+                        while let Some(demuxed) = demuxer.pull()? {
+                            yield demuxed;
+                        }
+                    },
+                    PacketItem::SenderReport(p) => yield DemuxedItem::SenderReport(p),
+                };
+            }
+        })
+    }
+
     /// Returns the next packet, an error, or `None` on end of stream.
     /// Also manages keepalives; this will send them as necessary to keep the
     /// stream open, and fail when sending a following keepalive if the
@@ -561,7 +626,7 @@ impl Session<Playing> {
     ///
     /// TODO: this should also pass along RTCP packets. There can be multiple
     /// RTCP packets per data message, so that will require keeping more state.
-    pub async fn next(self: Pin<&mut Self>) -> Option<Result<rtp::Packet, Error>> {
+    async fn next(self: Pin<&mut Self>) -> Option<Result<PacketItem, Error>> {
         let this = self.project();
         let mut state = this.state.project();
         loop {
@@ -597,6 +662,16 @@ impl Session<Playing> {
                 },
 
                 () = &mut state.keepalive_timer => {
+                    // TODO: deadlock possibility. Once we decide to send a
+                    // keepalive, we don't try receiving anything until the
+                    // keepalive is fully sent. The server might similarly be
+                    // stubbornly trying to send before receiving. If all the
+                    // socket buffers are full, deadlock can result.
+                    //
+                    // This is really unlikely right now when all we send are
+                    // keepalives, which are probably much smaller than our send
+                    // buffer. But if we start supporting ONVIF backchannel, it
+                    // will become more of a concern.
                     if let Err(e) = Session::handle_keepalive_timer(this.conn, &mut state).await {
                         return Some(Err(e));
                     }
@@ -634,7 +709,7 @@ impl Session<Playing> {
     }
 
     fn handle_data(state: &mut PlayingProj<'_>, ctx: Context, data: rtsp_types::Data<Bytes>)
-                   -> Result<Option<rtp::Packet>, Error> {
+                   -> Result<Option<PacketItem>, Error> {
         let c = data.channel_id();
         let m = match state.channels.lookup(c) {
             Some(m) => m,
@@ -648,8 +723,8 @@ impl Session<Playing> {
             _ => unreachable!("Session<Playing>'s {}->{:?} not in Playing state", c, m),
         };
         match m.channel_type {
-            ChannelType::Rtp => Ok(Some(
-                rtp_handler.process(ctx, &mut timeline, m.stream_i, data.into_body())?)),
+            ChannelType::Rtp => Ok(Some(PacketItem::RtpPacket(
+                rtp_handler.process(ctx, &mut timeline, m.stream_i, data.into_body())?))),
             ChannelType::Rtcp => {
                 // TODO: pass RTCP packets along. Currenly this just logs them.
                 // There can be multiple packets per data message, so we'll need to

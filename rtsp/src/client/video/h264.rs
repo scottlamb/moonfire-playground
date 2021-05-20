@@ -1,18 +1,15 @@
 //! [H.264](https://www.itu.int/rec/T-REC-H.264-201906-I/en)-encoded video.
 
-use std::{cell::RefCell, convert::TryFrom};
+use std::convert::TryFrom;
 
-use async_trait::async_trait;
 use bytes::{Bytes, BytesMut, Buf, BufMut};
 use failure::{Error, bail, format_err};
-use h264_reader::{annexb::NalReader, nal::{UnitType, sei::SeiIncrementalPayloadReader, slice::SliceLayerWithoutPartitioningRbsp}};
-use log::{debug, info, log_enabled, trace};
+use h264_reader::nal::UnitType;
+use log::debug;
 
-use crate::client::video::Picture;
+use crate::client::{self, rtp::Packet, video::Picture};
 
-use super::VideoHandler;
-
-/// A [super::rtp::PacketHandler] implementation which finds access unit boundaries
+/// A [super::rtp::PacketDemuxer] implementation which finds access unit boundaries
 /// and produces unfragmented NAL units as specified in [RFC
 /// 6184](https://tools.ietf.org/html/rfc6184).
 ///
@@ -21,25 +18,38 @@ use super::VideoHandler;
 /// pictures and association to access units".
 /// 
 /// Currently expects that the stream starts at an access unit boundary and has no lost packets.
-pub struct Handler<A: AccessUnitHandler> {
-    inner: A,
-
-    state: HandlerState,
+pub struct Demuxer {
+    input_state: DemuxerInputState,
+    pending: Option<AccessUnit>,
+    parameters: Parameters,
 
     /// The largest fragment used. This is used for the buffer capacity on subsequent fragments, minimizing reallocation.
     frag_high_water: usize,
 }
 
-struct PreMark {
+#[derive(Debug)]
+struct AccessUnit {
+    /// The context as of the start of the access unit.
+    ctx: crate::Context,
     timestamp: crate::Timestamp,
+    stream_id: usize,
+    new_sps: Option<Bytes>,
+    new_pps: Option<Bytes>,
 
-    /// If a FU-A fragment is in progress, the buffer used to accumulate the NAL.
-    frag_buf: Option<BytesMut>,
+    /// Currently we expect only a single slice NAL.
+    picture: Option<Bytes>,
 }
 
-enum HandlerState {
-    /// Not currently processing an access unit.
-    Inactive,
+struct PreMark {
+    /// If a FU-A fragment is in progress, the buffer used to accumulate the NAL.
+    frag_buf: Option<BytesMut>,
+
+    access_unit: AccessUnit,
+}
+
+enum DemuxerInputState {
+    /// Not yet processing an access unit.
+    New,
 
     /// Currently processing an access unit.
     /// This will be flushed after a marked packet or when receiving a later timestamp.
@@ -49,60 +59,51 @@ enum HandlerState {
     PostMark { timestamp: crate::Timestamp },
 }
 
-impl<A: AccessUnitHandler> Handler<A> {
-    pub fn new(inner: A) -> Self {
-        Handler {
-            inner,
-            state: HandlerState::Inactive,
+impl Demuxer {
+    pub(crate) fn new(parameters: Parameters) -> Box<dyn client::Demuxer> {
+        Box::new(Demuxer {
+            input_state: DemuxerInputState::New,
+            pending: None,
             frag_high_water: 0,
-        }
-    }
-
-    pub fn into_inner(self) -> A {
-        self.inner
+            parameters,
+        })
     }
 }
 
-#[async_trait]
-impl<A: AccessUnitHandler + Send> crate::client::rtp::PacketHandler for Handler<A> {
-    async fn end(&mut self) -> Result<(), Error> {
-        if let HandlerState::PostMark{..} = self.state {
-            self.inner.end().await?;
+impl client::Demuxer for Demuxer {
+    fn push(&mut self, pkt: Packet) -> Result<(), Error> {
+        // Push shouldn't be called until pull is exhausted.
+        if let Some(p) = self.pending.as_ref() {
+            panic!("push with data already pending: {:?}", p);
         }
-        Ok(())
-    }
 
-    async fn pkt(&mut self, pkt: crate::client::rtp::Packet) -> Result<(), Error> {
         // The rtp crate also has [H.264 depacketization
         // logic](https://docs.rs/rtp/0.2.2/rtp/codecs/h264/struct.H264Packet.html),
         // but it doesn't seem to match my use case. I want to iterate the NALs,
         // not re-encode them in Annex B format.
         let seq = pkt.sequence_number;
-        let mut premark = match std::mem::replace(&mut self.state, HandlerState::Inactive) {
-            HandlerState::Inactive => {
-                self.inner.start(&pkt.rtsp_ctx, pkt.timestamp).await?;
+        let mut premark = match std::mem::replace(&mut self.input_state, DemuxerInputState::New) {
+            DemuxerInputState::New => {
                 PreMark {
-                    timestamp: pkt.timestamp,
-                    frag_buf: None
+                    access_unit: AccessUnit::start(pkt.rtsp_ctx, pkt.timestamp, pkt.stream_id),
+                    frag_buf: None,
                 }
             },
-            HandlerState::PreMark(state) => {
-                if state.timestamp.timestamp != pkt.timestamp.timestamp {
-                    if state.frag_buf.is_some() {
-                        bail!("Timestamp changed from {} to {} in the middle of a fragmented NAL at seq={:04x} {:#?}", state.timestamp, pkt.timestamp, seq, &pkt.rtsp_ctx);
+            DemuxerInputState::PreMark(mut premark) => {
+                if premark.access_unit.timestamp.timestamp != pkt.timestamp.timestamp {
+                    if premark.frag_buf.is_some() {
+                        bail!("Timestamp changed from {} to {} in the middle of a fragmented NAL at seq={:04x} {:#?}", premark.access_unit.timestamp, pkt.timestamp, seq, &pkt.rtsp_ctx);
                     }
-                    self.inner.end().await?;
+                    self.pending = Some(std::mem::replace(&mut premark.access_unit, AccessUnit::start(pkt.rtsp_ctx, pkt.timestamp, pkt.stream_id)));
                 }
-                state
+                premark
             },
-            HandlerState::PostMark { timestamp: state_ts } => {
+            DemuxerInputState::PostMark { timestamp: state_ts } => {
                 if state_ts.timestamp == pkt.timestamp.timestamp {
                     bail!("Received packet with timestamp {} after marked packet with same timestamp at seq={:04x} {:#?}", pkt.timestamp, seq, &pkt.rtsp_ctx);
                 }
-                self.inner.end().await?;
-                self.inner.start(&pkt.rtsp_ctx, pkt.timestamp).await?;
                 PreMark {
-                    timestamp: pkt.timestamp,
+                    access_unit: AccessUnit::start(pkt.rtsp_ctx, pkt.timestamp, pkt.stream_id),
                     frag_buf: None,
                 }
             }
@@ -122,19 +123,27 @@ impl<A: AccessUnitHandler + Send> crate::client::rtp::PacketHandler for Handler<
                 if premark.frag_buf.is_some() {
                     bail!("Non-fragmented NAL while fragment in progress seq {:04x} {:#?}", seq, &pkt.rtsp_ctx);
                 }
-                self.inner.nal(data).await?;
+                premark.access_unit.nal(&mut self.parameters, data)?;
             },
-            24 => { // STAP-A
+            24 => { // STAP-A. https://tools.ietf.org/html/rfc6184#section-5.7.1
                 data.advance(1);  // skip the header byte.
-                while data.remaining() > 2 {
-                    let len = usize::from(data.get_u16());
-                    if data.remaining() < len {
-                        bail!("STAP-A too short");
+                loop {
+                    if data.remaining() < 2 {
+                        bail!("STAP-A has {} remaining bytes while expecting 2-byte length",
+                              data.remaining());
                     }
-                    self.inner.nal(data.split_to(len)).await?;
-                }
-                if data.has_remaining() {
-                    bail!("STAP-A too short");
+                    let len = usize::from(data.get_u16());
+                    match data.remaining().cmp(&len) {
+                        std::cmp::Ordering::Less => bail!(
+                            "STAP-A too short: {} bytes remaining, expecting {}-byte NAL",
+                            data.remaining(),
+                            len),
+                        std::cmp::Ordering::Equal => {
+                            premark.access_unit.nal(&mut self.parameters, data)?;
+                            break;
+                        },
+                        std::cmp::Ordering::Greater => premark.access_unit.nal(&mut self.parameters, data.split_to(len))?,
+                    }
                 }
             },
             25..=27 | 29 => unimplemented!("unimplemented NAL (header 0x{:02x}) at seq {:04x} {:#?}", nal_header, seq, &pkt.rtsp_ctx),
@@ -168,7 +177,7 @@ impl<A: AccessUnitHandler + Send> crate::client::rtp::PacketHandler for Handler<
                         frag_buf.put(data);
                         if end {
                             self.frag_high_water = frag_buf.len();
-                            self.inner.nal(frag_buf.freeze()).await?;
+                            premark.access_unit.nal(&mut self.parameters, frag_buf.freeze())?;
                         } else if pkt.mark {
                             bail!("FU-A with MARK and no END at seq {:04x} {:#?}", seq, pkt.rtsp_ctx);
                         } else {
@@ -180,190 +189,84 @@ impl<A: AccessUnitHandler + Send> crate::client::rtp::PacketHandler for Handler<
             },
             _ => bail!("bad nal header {:0x} at seq {:04x} {:#?}", nal_header, seq, &pkt.rtsp_ctx),
         }
-        if pkt.mark {
-            self.state = HandlerState::PostMark { timestamp: pkt.timestamp };
+        self.input_state = if pkt.mark {
+            self.pending = Some(premark.access_unit);
+            DemuxerInputState::PostMark { timestamp: pkt.timestamp }
         } else {
-            self.state = HandlerState::PreMark(premark);
-        }
+            DemuxerInputState::PreMark(premark)
+        };
         Ok(())
     }
-}
 
-/// Processes H.264 access units and NALs.
-#[async_trait]
-pub trait AccessUnitHandler {
-    /// Starts an access unit.
-    async fn start(&mut self, rtsp_ctx: &crate::Context, timestamp: crate::Timestamp) -> Result<(), Error>;
-
-    /// Processes a single NAL.
-    /// Must be between `start` and `end` calls. `nal` is guaranteed to have a header byte.
-    async fn nal(&mut self, nal: Bytes) -> Result<(), Error>;
-
-    /// Ends an access unit.
-    async fn end(&mut self) -> Result<(), Error>;
-}
-
-/// Produces [VideoHandler] events from [AccessUnitHandler] events.
-/// Currently this is a naïve implementation which assumes each access unit has a single slice.
-pub struct VideoAccessUnitHandler<V: VideoHandler<Parameters = Parameters>> {
-    parameters: Parameters,
-    state: VideoState,
-    inner: V,
-}
-
-enum VideoState {
-    Unstarted,
-    Started {
-        timestamp: crate::Timestamp,
-        new_sps: Option<Bytes>,
-        new_pps: Option<Bytes>,
-    },
-    SentPicture,
-}
-
-impl<V: VideoHandler<Parameters = Parameters> + Send> VideoAccessUnitHandler<V> {
-    pub fn new(parameters: Parameters, inner: V) -> Self {
-        Self {
-            parameters,
-            state: VideoState::Unstarted,
-            inner,
+    fn pull(&mut self) -> Result<Option<client::DemuxedItem>, Error> {
+        let mut pending = match self.pending.take() {
+            None => return Ok(None),
+            Some(p) => p,
+        };
+        if pending.new_sps.is_some() || pending.new_pps.is_some() {
+            let sps_nal = pending.new_sps.as_deref().unwrap_or(self.parameters.sps_nal());
+            let pps_nal = pending.new_pps.as_deref().unwrap_or(self.parameters.pps_nal());
+            let new_parameters = Parameters::from_sps_and_pps(sps_nal, pps_nal)?;
+            pending.new_sps = None;
+            pending.new_pps = None;
+            self.pending = Some(pending);
+            self.parameters = new_parameters.clone();
+            return Ok(Some(client::DemuxedItem::ParameterChange(new_parameters)));
         }
-    }
-
-    pub fn into_inner(self) -> V {
-        self.inner
+        let picture = pending.picture.ok_or_else(|| format_err!("access unit has no picture"))?;
+        let nal_header = h264_reader::nal::NalHeader::new(picture[0]).expect("nal header was previously valid");
+        Ok(Some(client::DemuxedItem::Picture(Picture {
+            rtp_timestamp: pending.timestamp,
+            stream_id: pending.stream_id,
+            is_random_access_point: nal_header.nal_unit_type() == UnitType::SliceLayerWithoutPartitioningIdr,
+            is_disposable: nal_header.nal_ref_idc() == 0,
+            pos: 0,
+            data_prefix: u32::try_from(picture.len()).unwrap().to_be_bytes(),
+            data: picture,
+        })))
     }
 }
 
-#[async_trait]
-impl<V: VideoHandler<Parameters = Parameters> + Send> AccessUnitHandler for VideoAccessUnitHandler<V> {
-    async fn start(&mut self, _rtsp_ctx: &crate::Context, timestamp: crate::Timestamp) -> Result<(), Error> {
-        if !matches!(self.state, VideoState::Unstarted) {
-            bail!("access unit started in invalid state");
-        }
-        self.state = VideoState::Started {
+impl AccessUnit {
+    fn start(ctx: crate::Context, timestamp: crate::Timestamp, stream_id: usize) -> Self {
+        AccessUnit {
+            ctx,
             timestamp,
+            stream_id,
             new_sps: None,
             new_pps: None,
-        };
-        Ok(())
+            picture: None,
+        }
     }
 
-    async fn nal(&mut self, nal: Bytes) -> Result<(), Error> {
+    fn nal(&mut self, parameters: &mut Parameters, nal: Bytes) -> Result<(), Error> {
         let nal_header = h264_reader::nal::NalHeader::new(nal[0]).map_err(|e| format_err!("bad NAL header 0x{:x}: {:#?}", nal[0], e))?;
-        let (timestamp, new_sps, new_pps) = match &mut self.state {
-            VideoState::Unstarted => bail!("NAL outside access unit"),
-            VideoState::SentPicture => bail!("currently expects a single slice to end the access unit, got {:?}", nal_header),
-            VideoState::Started { timestamp, new_sps, new_pps } => (timestamp, new_sps, new_pps),
-        };
         let unit_type = nal_header.nal_unit_type();
         match unit_type {
             UnitType::SeqParameterSet => {
-                if new_sps.is_some() {
+                if self.new_sps.is_some() {
                     bail!("multiple SPSs in access unit");
                 }
-                if nal != self.parameters.sps_nal() {
-                    *new_sps = Some(nal);
+                if nal != parameters.sps_nal() {
+                    self.new_sps = Some(nal);
                 }
             },
             UnitType::PicParameterSet => {
-                if new_pps.is_some() {
+                if self.new_pps.is_some() {
                     bail!("multiple PPSs in access unit");
                 }
-                if nal != self.parameters.pps_nal() {
-                    *new_pps = Some(nal);
+                if nal != parameters.pps_nal() {
+                    self.new_pps = Some(nal);
                 }
             },
             UnitType::SliceLayerWithoutPartitioningIdr | UnitType::SliceLayerWithoutPartitioningNonIdr => {
-                if new_sps.is_some() || new_pps.is_some() {
-                    let sps_nal = new_sps.as_ref().map(|b| &b[..]).unwrap_or(self.parameters.sps_nal());
-                    let pps_nal = new_pps.as_ref().map(|b| &b[..]).unwrap_or(self.parameters.pps_nal());
-                    let new_metadata = Parameters::from_sps_and_pps(sps_nal, pps_nal)?;
-                    self.inner.parameters_change(&new_metadata).await?;
-                    self.parameters = new_metadata;
+                if self.picture.is_some() {
+                    bail!("currently expect only one picture NAL per access unit");
                 }
-                let rtp_timestamp = *timestamp;
-                self.state = VideoState::SentPicture;
-                self.inner.picture(Picture {
-                    rtp_timestamp,
-                    is_random_access_point: unit_type == UnitType::SliceLayerWithoutPartitioningIdr,
-                    is_disposable: nal_header.nal_ref_idc() == 0,
-                    pos: 0,
-                    data_prefix: u32::try_from(nal.len()).unwrap().to_be_bytes(),
-                    data: nal,
-                }).await?;
+                self.picture = Some(nal);
             },
             _ => {},
         }
-        Ok(())
-    }
-
-    async fn end(&mut self) -> Result<(), Error> {
-        if !matches!(self.state, VideoState::SentPicture) {
-            bail!("access unit ended in invalid state");
-        }
-        self.state = VideoState::Unstarted;
-        Ok(())
-    }
-}
-
-pub struct PrintAccessUnitHandler {
-    ctx: h264_reader::Context<()>,
-}
-
-struct HeaderPrinter;
-
-impl SeiIncrementalPayloadReader for HeaderPrinter {
-    type Ctx = ();
-
-    fn start(&mut self, _ctx: &mut h264_reader::Context<Self::Ctx>, payload_type: h264_reader::nal::sei::HeaderType, payload_size: u32) {
-        trace!("  SEI payload type={:?} size={}", &payload_type, payload_size);
-    }
-
-    fn push(&mut self, _ctx: &mut h264_reader::Context<Self::Ctx>, buf: &[u8]) {
-        use pretty_hex::PrettyHex;
-        trace!("SEI: {:?}", buf.hex_dump());
-    }
-    fn end(&mut self, _ctx: &mut h264_reader::Context<Self::Ctx>) {}
-    fn reset(&mut self, _ctx: &mut h264_reader::Context<Self::Ctx>) {}
-}
-
-impl PrintAccessUnitHandler {
-    pub fn new(metadata: &Parameters) -> Result<Self, Error> {
-        let config = h264_reader::avcc::AvcDecoderConfigurationRecord::try_from(&metadata.avc_decoder_config[..])
-            .map_err(|e| format_err!("{:?}", e))?;
-        let ctx = config.create_context(())
-            .map_err(|e| format_err!("{:?}", e))?;
-        Ok(PrintAccessUnitHandler {
-            ctx,
-        })
-    }
-}
-
-#[async_trait]
-impl AccessUnitHandler for PrintAccessUnitHandler {
-    async fn start(&mut self, _rtsp_ctx: &crate::Context, timestamp: crate::Timestamp) -> Result<(), Error> {
-        info!("access unit with timestamp {}:", timestamp);
-        Ok(())
-    }
-
-    async fn nal(&mut self, nal: Bytes) -> Result<(), Error> {
-        let nal_header = h264_reader::nal::NalHeader::new(nal[0]).map_err(|e| format_err!("bad NAL header 0x{:x}: {:#?}", nal[0], e))?;
-        info!("  nal ref_idc={} type={} ({:?}) size={}", nal_header.nal_ref_idc(), nal_header.nal_unit_type().id(), nal_header.nal_unit_type(), nal.len());
-        if log_enabled!(log::Level::Trace) {
-            let sei_handler = h264_reader::nal::sei::SeiNalHandler::new(HeaderPrinter);
-            let mut nal_switch = h264_reader::nal::NalSwitch::default();
-            nal_switch.put_handler(UnitType::SEI, Box::new(RefCell::new(sei_handler)));
-            nal_switch.put_handler(UnitType::SliceLayerWithoutPartitioningIdr, Box::new(RefCell::new(SliceLayerWithoutPartitioningRbsp::default())));
-            nal_switch.put_handler(UnitType::SliceLayerWithoutPartitioningNonIdr, Box::new(RefCell::new(SliceLayerWithoutPartitioningRbsp::default())));
-            nal_switch.start(&mut self.ctx);
-            nal_switch.push(&mut self.ctx, &nal[..]);
-            nal_switch.end(&mut self.ctx);
-        }
-        Ok(())
-    }
-
-    async fn end(&mut self) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -425,7 +328,7 @@ impl Parameters {
     pub fn from_format_specific_params(format_specific_params: &str) -> Result<Self, Error> {
         let mut sprop_parameter_sets = None;
         for p in format_specific_params.split(';') {
-            let (key, value) = crate::client::parse::split_once(p.trim(), '=').unwrap();
+            let (key, value) = client::parse::split_once(p.trim(), '=').unwrap();
             if key == "sprop-parameter-sets" {
                 sprop_parameter_sets = Some(value);
             }

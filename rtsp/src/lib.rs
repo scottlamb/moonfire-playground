@@ -72,9 +72,9 @@ impl Timestamp {
         (self.elapsed() as f64) / (self.clock_rate as f64)
     }
 
-    pub fn try_add(&self, delta: u32) -> Result<Self, Error> {
+    pub fn try_add(&self, delta: u64) -> Result<Self, Error> {
         Ok(Timestamp {
-            timestamp: self.timestamp.checked_add(u64::from(delta))
+            timestamp: self.timestamp.checked_add(delta)
                 .ok_or_else(|| format_err!("overflow on {:?} + {}", &self, delta))?,
             clock_rate: self.clock_rate,
             start: self.start,

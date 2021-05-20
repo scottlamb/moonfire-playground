@@ -11,13 +11,12 @@
 //!         ISO base media file format.
 //!     *   ISO/IEC 14496-14: MP4 File Format.
 
-use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use failure::{Error, bail, format_err};
 use pretty_hex::PrettyHex;
 use std::{convert::TryFrom, fmt::Debug};
 
-use crate::client::rtp::PacketHandler;
+use crate::client::{DemuxedItem, rtp::Packet};
 
 /// An AudioSpecificConfig as in ISO/IEC 14496-3 section 1.6.2.1.
 /// Currently just a few fields of interest.
@@ -372,12 +371,8 @@ impl std::fmt::Debug for Parameters {
     }
 }
 
-#[async_trait]
-pub trait FrameHandler {
-    async fn frame(&mut self, frame: Frame) -> Result<(), Error>;
-}
-
 pub struct Frame {
+    pub ctx: crate::Context,
     pub timestamp: crate::Timestamp,
     pub data: Bytes,
 }
@@ -391,10 +386,33 @@ impl Debug for Frame {
     }
 }
 
-pub struct Handler<F> {
+pub(crate) struct Demuxer {
     params: Parameters,
-    frag: Option<Fragment>,
-    inner: F,
+    state: DemuxerState,
+}
+
+struct Aggregate {
+    ctx: crate::Context,
+
+    /// The RTP-level timestamp; frame `i` is at timestamp `timestamp + frame_length*i`.
+    timestamp: crate::Timestamp,
+
+    /// The buffer, positioned at frame 0's header.
+    buf: Bytes,
+
+    /// The index in range `[0, frame_count)` of the next frame to output.
+    frame_i: u16,
+
+    /// The non-zero total frames within this aggregate.
+    frame_count: u16,
+
+    /// The starting byte offset of `frame_i`'s data within `buf`.
+    data_off: usize,
+
+    /// If a mark was set on this packet. When this is false, this should
+    /// actually be the start of a fragmented frame, but that conversion is
+    /// currently deferred until `pull`.
+    mark: bool,
 }
 
 struct Fragment {
@@ -403,19 +421,24 @@ struct Fragment {
     buf: BytesMut,
 }
 
-impl<F> Handler<F> {
-    pub fn new(params: Parameters, inner: F) -> Self {
-        Self {
+enum DemuxerState {
+    Idle,
+    Aggregated(Aggregate),
+    Fragmented(Fragment),
+    Ready(Frame),
+}
+
+impl Demuxer {
+    pub(crate) fn new(params: Parameters) -> Box<dyn crate::client::Demuxer> {
+        Box::new(Self {
             params,
-            frag: None,
-            inner,
-         }
+            state: DemuxerState::Idle,
+        })
     }
 }
 
-#[async_trait]
-impl<F: FrameHandler + Send> PacketHandler for Handler<F> {
-    async fn pkt(&mut self, mut pkt: crate::client::rtp::Packet) -> Result<(), Error> {
+impl crate::client::Demuxer for Demuxer {
+    fn push(&mut self, mut pkt: Packet) -> Result<(), Error> {
         // Read the AU headers.
         if pkt.payload.len() < 2 {
             bail!("packet too short for au-header-length");
@@ -426,94 +449,121 @@ impl<F: FrameHandler + Send> PacketHandler for Handler<F> {
         if (au_headers_length_bits & 0x7) != 0 {
             bail!("bad au-headers-length {}", au_headers_length_bits);
         }
-        let au_headers_count = usize::from(au_headers_length_bits >> 4);
-        let mut data_off = au_headers_count << 1;
-        if pkt.payload.len() < (au_headers_count << 1) {
+        let au_headers_count = au_headers_length_bits >> 4;
+        let data_off = usize::from(au_headers_count) << 1;
+        if pkt.payload.len() < (usize::from(au_headers_count) << 1) {
             bail!("packet too short for au-headers");
         }
-        if let Some(mut frag) = self.frag.take() { // fragment in progress.
-            if au_headers_count != 1 {
-                bail!("Got {}-AU packet while fragment in progress");
-            }
-            if (pkt.timestamp.timestamp as u16) != frag.rtp_timestamp {
-                bail!("Timestamp changed from 0x{:04x} to 0x{:04x} mid-fragment",
-                      frag.rtp_timestamp, pkt.timestamp.timestamp as u16);
-            }
-            let au_header = u16::from_be_bytes([pkt.payload[0], pkt.payload[1]]);
-            let size = usize::from(au_header >> 3);
-            if size != usize::from(frag.size) {
-                bail!("size changed {}->{} mid-fragment", frag.size, size);
-            }
-            let data = &pkt.payload[data_off..];
-            match (frag.buf.len() + data.len()).cmp(&size) {
-                std::cmp::Ordering::Less => {
-                    if pkt.mark {
-                        bail!("frag marked complete when {}+{}<{}", frag.buf.len(), data.len(), size);
-                    }
-                    self.frag = Some(frag);
-                },
-                std::cmp::Ordering::Equal => {
-                    if !pkt.mark {
-                        bail!("frag not marked complete when full data present");
-                    }
-                    frag.buf.extend_from_slice(data);
-                    println!("au {}: len-{}, fragmented", &pkt.timestamp, size);
-                    self.inner.frame(Frame {
-                        timestamp: pkt.timestamp,
-                        data: frag.buf.freeze(),
-                    }).await?;
-                },
-                std::cmp::Ordering::Greater => bail!("too much data in fragment"),
-            }
-            return Ok(());
-        }
-        for i in 0..au_headers_count {
-            let au_header = u16::from_be_bytes([pkt.payload[i << 1], pkt.payload[(i << 1) + 1]]);
-            let size = usize::from(au_header >> 3);
-            let index = au_header & 0b111;
-            if index != 0 {
-                // First AU's index must be zero; subsequent AU's deltas > 1
-                // indicate interleaving, which we don't support.
-                // TODO: https://datatracker.ietf.org/doc/html/rfc3640#section-3.3.6
-                // says "receivers MUST support de-interleaving".
-                bail!("interleaving not yet supported");
-            }
-            if size > pkt.payload.len() - data_off { // start of fragment
+        match &mut self.state {
+            DemuxerState::Fragmented(ref mut frag) => {
                 if au_headers_count != 1 {
-                    bail!("fragmented AUs must not share packets");
+                    bail!("Got {}-AU packet while fragment in progress", au_headers_count);
                 }
-                if pkt.mark {
-                    bail!("mark can't be set on beginning of fragment");
+                if (pkt.timestamp.timestamp as u16) != frag.rtp_timestamp {
+                    bail!("Timestamp changed from 0x{:04x} to 0x{:04x} mid-fragment",
+                        frag.rtp_timestamp, pkt.timestamp.timestamp as u16);
                 }
-                let mut buf = BytesMut::with_capacity(size);
-                buf.extend_from_slice(&pkt.payload[data_off..]);
-                self.frag = Some(Fragment {
-                    rtp_timestamp: pkt.timestamp.timestamp as u16,
-                    size: size as u16,
-                    buf,
+                let au_header = u16::from_be_bytes([pkt.payload[0], pkt.payload[1]]);
+                let size = usize::from(au_header >> 3);
+                if size != usize::from(frag.size) {
+                    bail!("size changed {}->{} mid-fragment", frag.size, size);
+                }
+                let data = &pkt.payload[data_off..];
+                match (frag.buf.len() + data.len()).cmp(&size) {
+                    std::cmp::Ordering::Less => {
+                        if pkt.mark {
+                            bail!("frag marked complete when {}+{}<{}", frag.buf.len(), data.len(), size);
+                        }
+                    },
+                    std::cmp::Ordering::Equal => {
+                        if !pkt.mark {
+                            bail!("frag not marked complete when full data present");
+                        }
+                        frag.buf.extend_from_slice(data);
+                        println!("au {}: len-{}, fragmented", &pkt.timestamp, size);
+                        self.state = DemuxerState::Ready(Frame {
+                            ctx: pkt.rtsp_ctx,
+                            timestamp: pkt.timestamp,
+                            data: std::mem::take(&mut frag.buf).freeze(),
+                        });
+                    },
+                    std::cmp::Ordering::Greater => bail!("too much data in fragment"),
+                }
+            },
+            DemuxerState::Aggregated(_) => panic!("push when already in state aggregated"),
+            DemuxerState::Idle => {
+                if au_headers_count == 0 {
+                    bail!("aggregate with no headers");
+                }
+                self.state = DemuxerState::Aggregated(Aggregate {
+                    ctx: pkt.rtsp_ctx,
+                    timestamp: pkt.timestamp,
+                    buf: pkt.payload,
+                    frame_i: 0,
+                    frame_count: au_headers_count,
+                    data_off,
+                    mark: pkt.mark,
                 });
-                return Ok(());
-            }
-            if !pkt.mark {
-                bail!("mark must be set on non-fragmented au");
-            }
-            self.inner.frame(Frame {
-                timestamp: pkt.timestamp.try_add(self.params.config.frame_length)?,
-                data: pkt.payload.slice(data_off..data_off+size),
-            }).await?;
-            data_off += size;
-        }
-        if data_off < pkt.payload.len() {
-            bail!("extra data at end of packet");
+            },
+            DemuxerState::Ready(..) => panic!("push when in state ready"),
         }
         Ok(())
     }
 
-    async fn end(&mut self) -> Result<(), Error> {
-        if self.frag.is_some() {
-            bail!("stream ended mid-fragment");
+    fn pull(&mut self) -> Result<Option<crate::client::DemuxedItem>, Error> {
+        match std::mem::replace(&mut self.state, DemuxerState::Idle) {
+            s @ DemuxerState::Idle | s @ DemuxerState::Fragmented(..) => {
+                self.state = s;
+                Ok(None)
+            },
+            DemuxerState::Ready(f) => {
+                self.state = DemuxerState::Idle;
+                Ok(Some(DemuxedItem::AudioFrame(f)))
+            }
+            DemuxerState::Aggregated(mut agg) => {
+                let i = usize::from(agg.frame_i);
+                let au_header = u16::from_be_bytes([agg.buf[i << 1], agg.buf[(i << 1) + 1]]);
+                let size = usize::from(au_header >> 3);
+                let index = au_header & 0b111;
+                if index != 0 {
+                    // First AU's index must be zero; subsequent AU's deltas > 1
+                    // indicate interleaving, which we don't support.
+                    // TODO: https://datatracker.ietf.org/doc/html/rfc3640#section-3.3.6
+                    // says "receivers MUST support de-interleaving".
+                    bail!("interleaving not yet supported");
+                }
+                if size > agg.buf.len() - agg.data_off { // start of fragment
+                    if agg.frame_count != 1 {
+                        bail!("fragmented AUs must not share packets");
+                    }
+                    if agg.mark {
+                        bail!("mark can't be set on beginning of fragment");
+                    }
+                    let mut buf = BytesMut::with_capacity(size);
+                    buf.extend_from_slice(&agg.buf[agg.data_off..]);
+                    self.state = DemuxerState::Fragmented(Fragment {
+                        rtp_timestamp: agg.timestamp.timestamp as u16,
+                        size: size as u16,
+                        buf,
+                    });
+                    return Ok(None);
+                }
+                if !agg.mark {
+                    bail!("mark must be set on non-fragmented au");
+                }
+                let frame = Frame {
+                    ctx: agg.ctx,
+                    timestamp: agg.timestamp.try_add(u64::from(agg.frame_i) * u64::from(self.params.config.frame_length))?,
+                    data: agg.buf.slice(agg.data_off..agg.data_off+size),
+                };
+                agg.data_off += size;
+                agg.frame_i += 1;
+                if agg.frame_i < agg.frame_count {
+                    self.state = DemuxerState::Aggregated(agg);
+                }
+                Ok(Some(DemuxedItem::AudioFrame(frame)))
+            },
         }
-        Ok(())
     }
 }
 

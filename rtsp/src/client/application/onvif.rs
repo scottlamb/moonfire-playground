@@ -27,11 +27,8 @@ impl<M: MessageHandler + Send> Handler<M> {
             inner,
         }
     }
-}
 
-#[async_trait]
-impl<M: MessageHandler + Send> crate::client::rtp::PacketHandler for Handler<M> {
-    async fn pkt(&mut self, pkt: crate::client::rtp::Packet) -> Result<(), failure::Error> {
+    pub async fn pkt(&mut self, pkt: crate::client::rtp::Packet) -> Result<(), failure::Error> {
         if let Some((timestamp, mut buf)) = self.in_progress.take() {
             if timestamp.timestamp != pkt.timestamp.timestamp {
                 bail!("Timestamp changed from {} to {} (seq {:04x} with message in progress",
@@ -54,7 +51,7 @@ impl<M: MessageHandler + Send> crate::client::rtp::PacketHandler for Handler<M> 
         Ok(())
     }
 
-    async fn end(&mut self) -> Result<(), failure::Error> {
+    pub async fn end(&mut self) -> Result<(), failure::Error> {
         todo!()
     }
 }

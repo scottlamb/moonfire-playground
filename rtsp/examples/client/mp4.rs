@@ -10,11 +10,12 @@
 //! serving for arbitrary time ranges, and supports standard and fragmented
 //! `.mp4` files.
 
-use async_trait::async_trait;
 use bytes::{Buf, BufMut, BytesMut};
 use failure::{Error, bail, format_err};
+use futures::StreamExt;
 use log::info;
-use moonfire_rtsp::client::{audio::aac::FrameHandler, rtp::PacketHandler, video::{Parameters, VideoHandler, h264}};
+use moonfire_rtsp::client::video::Parameters as _;
+use moonfire_rtsp::client::{DemuxedItem, video::h264::{self, Parameters}};
 
 use std::convert::TryFrom;
 use std::io::SeekFrom;
@@ -23,7 +24,6 @@ use tokio::io::{AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use url::Url;
 
 /// Writes a box length for everything appended in the supplied scope.
-/// Used only within FileBuilder::build (and methods it calls internally).
 macro_rules! write_box {
     ($buf:expr, $fourcc:expr, $b:block) => {{
         let _: &mut BytesMut = $buf; // type-check.
@@ -53,7 +53,7 @@ async fn write_all_buf<W: AsyncWrite + Unpin, B: Buf>(writer: &mut W, buf: &mut 
 pub struct Mp4Writer<W: AsyncWrite + AsyncSeek + Send + Unpin> {
     mdat_start: u32,
     mdat_len: u32,
-    parameters: moonfire_rtsp::client::video::h264::Parameters,
+    parameters: Parameters,
     last_pts: Option<u64>,
 
     /// Differences between pairs of pts, in timescale units.
@@ -73,7 +73,7 @@ pub struct Mp4Writer<W: AsyncWrite + AsyncSeek + Send + Unpin> {
 }
 
 impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
-    pub async fn new(parameters: moonfire_rtsp::client::video::h264::Parameters, mut inner: W) -> Result<Self, Error> {
+    pub async fn new(parameters: Parameters, mut inner: W) -> Result<Self, Error> {
         let mut buf = BytesMut::new();
         write_box!(&mut buf, b"ftyp", {
             buf.extend_from_slice(&[
@@ -264,13 +264,8 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
         });
         Ok(())
     }
-}
 
-#[async_trait]
-impl<W: AsyncWrite + AsyncSeek + Send + Unpin> VideoHandler for Mp4Writer<W> {
-    type Parameters = moonfire_rtsp::client::video::h264::Parameters;
-
-    async fn parameters_change(&mut self, parameters: &Self::Parameters) -> Result<(), failure::Error> {
+    async fn parameters_change(&mut self, parameters: Parameters) -> Result<(), failure::Error> {
         bail!("parameters change unimplemented. new parameters: {:#?}", parameters)
     }
 
@@ -294,16 +289,6 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> VideoHandler for Mp4Writer<W> {
     }
 }
 
-struct FH;
-
-#[async_trait]
-impl FrameHandler for FH {
-    async fn frame(&mut self, frame: moonfire_rtsp::client::audio::aac::Frame) -> Result<(), Error> {
-        println!("{}: {}-byte audio frame", &frame.timestamp, &frame.data.len());
-        Ok(())
-    }
-}
-
 pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credentials>, out: PathBuf) -> Result<(), Error> {
     let stop = tokio::signal::ctrl_c();
     let mut session = moonfire_rtsp::client::Session::describe(url, credentials).await?;
@@ -318,7 +303,6 @@ pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credential
     let audio_stream_i = session.streams().iter()
         .position(|s| s.media == "audio" && s.parameters.is_some());
     session.setup(video_stream_i).await?;
-    let mut aac = None;
     if let Some(i) = audio_stream_i {
         session.setup(i).await?;
         let params = match session.streams()[i].parameters.as_ref() {
@@ -326,28 +310,26 @@ pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credential
             _ => panic!(),
         };
         info!("audio parameters: {:#?}", &params);
-        aac = Some(moonfire_rtsp::client::audio::aac::Handler::new(params, FH));
     }
-    let session = session.play().await?;
+    let session = session.play().await?.demuxed()?;
 
     // Read RTP data.
     let out = tokio::fs::File::create(out).await?;
-    let mp4_vid = Mp4Writer::new(video_parameters.clone(), out).await?;
-    let to_vid = moonfire_rtsp::client::video::h264::VideoAccessUnitHandler::new(video_parameters.clone(), mp4_vid);
-    //let mut print_au = moonfire_rtsp::client::video::h264::PrintAccessUnitHandler::new(&video_parameters)?;
-    let mut h264 = moonfire_rtsp::client::video::h264::Handler::new(to_vid);
+    let mut mp4 = Mp4Writer::new(video_parameters.clone(), out).await?;
 
     tokio::pin!(session);
     tokio::pin!(stop);
     loop {
         tokio::select! {
-            pkt = session.as_mut().next() => {
-                let pkt = pkt.ok_or_else(|| format_err!("EOF"))??;
-                if pkt.stream_id == video_stream_i {
-                    h264.pkt(pkt).await?;
-                } else if Some(pkt.stream_id) == audio_stream_i {
-                    aac.as_mut().unwrap().pkt(pkt).await?;
-                }
+            pkt = session.next() => {
+                match pkt.ok_or_else(|| format_err!("EOF"))?? {
+                    DemuxedItem::Picture(p) => mp4.picture(p).await?,
+                    DemuxedItem::AudioFrame(f) => {
+                        println!("{}: {}-byte audio frame", &f.timestamp, &f.data.len());
+                    },
+                    DemuxedItem::ParameterChange(p) => mp4.parameters_change(p).await?,
+                    DemuxedItem::SenderReport(_) => continue,
+                };
             },
             _ = &mut stop => {
                 break;
@@ -355,7 +337,6 @@ pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credential
         }
     }
     info!("Stopping");
-    let mp4 = h264.into_inner().into_inner();
     mp4.finish().await?;
     Ok(())
 }

@@ -1,18 +1,8 @@
 //! RTP handling.
 
-use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use failure::{Error, bail, format_err};
 use log::trace;
-
-#[derive(Debug)]
-pub enum Message {
-    /// An RTP packet.
-    Packet(Packet),
-
-    /// An RTCP sender report.
-    SenderReport(SenderReport),
-}
 
 /// An RTP packet.
 #[derive(Debug)]
@@ -32,16 +22,6 @@ pub struct SenderReport {
     pub rtsp_ctx: crate::Context,
     pub timestamp: crate::Timestamp,
     pub ntp_timestamp: crate::NtpTimestamp,
-}
-
-#[async_trait]
-pub trait PacketHandler {
-    /// Handles a packet.
-    /// `timestamp` is non-decreasing between calls.
-    async fn pkt(&mut self, pkt: Packet) -> Result<(), Error>;
-
-    /// Handles the end of the stream.
-    async fn end(&mut self) -> Result<(), Error>;
 }
 
 /// Maximum number of skipped initial sequence numbers.
