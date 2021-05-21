@@ -26,6 +26,12 @@ enum Cmd {
         #[structopt(flatten)]
         src: Source,
 
+        #[structopt(long)]
+        no_video: bool,
+
+        #[structopt(long)]
+        no_audio: bool,
+
         #[structopt(parse(try_from_str))]
         out: PathBuf,
     },
@@ -92,7 +98,8 @@ fn creds(username: Option<String>, password: Option<String>) -> Option<moonfire_
 async fn main_inner() -> Result<(), Error> {
     let cmd = Cmd::from_args();
     match cmd {
-        Cmd::Mp4 { out, src } => mp4::run(src.url, creds(src.username, src.password), out).await,
+        Cmd::Mp4 { out, src, no_video, no_audio } => mp4::run(
+            src.url, creds(src.username, src.password), no_video, no_audio, out).await,
         Cmd::Metadata { src } => metadata::run(src.url, creds(src.username, src.password)).await,
     }
 }

@@ -247,9 +247,6 @@ fn get_mp4a_box(parsed: &AudioSpecificConfig, config: &[u8]) -> Result<Bytes, Er
                         0x40,    // objectTypeIndication = Audio ISO/IEC 14496-3
                         0x15,    // streamType = audio, upstream = false, reserved = 1
                     ]);
-                    write_descriptor!(&mut buf, 0x05 /* DecSpecificInfoTag */, {
-                        buf.extend_from_slice(config);
-                    });
 
                     // bufferSizeDb is "the size of the decoding buffer for this
                     // elementary stream in byte". ISO/IEC 13818-7 section
@@ -354,6 +351,10 @@ impl Parameters {
             rfc6381_codec,
             sample_entry,
         })
+    }
+
+    pub fn sampling_frequency(&self) -> u32 {
+        self.config.sampling_frequency
     }
 
     pub fn sample_entry(&self) -> &[u8] {
