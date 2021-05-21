@@ -328,7 +328,7 @@ pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credential
                         println!("{}: {}-byte audio frame", &f.timestamp, &f.data.len());
                     },
                     DemuxedItem::ParameterChange(p) => mp4.parameters_change(p).await?,
-                    DemuxedItem::SenderReport(_) => continue,
+                    _ => continue,
                 };
             },
             _ = &mut stop => {

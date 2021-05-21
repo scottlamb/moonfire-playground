@@ -311,29 +311,43 @@ fn parse_media(base_url: &Url, media_description: &MediaDescription) -> Result<S
     }
 
     let mut parameters = None;
+    let encoding_name = encoding_name.to_ascii_lowercase();
 
     // https://tools.ietf.org/html/rfc6184#section-8.2.1
-    if encoding_name == "H264" {
-        if clock_rate != 90000 {
-            bail!("H.264 streams must have clock rate of 90000");
+    match media.as_str() {
+        "video" => {
+            if encoding_name == "h264" {
+                if clock_rate != 90000 {
+                    bail!("H.264 streams must have clock rate of 90000");
+                }
+                // This isn't an RFC 6184 requirement, but it makes things
+                // easier, and I haven't yet encountered a camera which doesn't
+                // specify out-of-band parameters.
+                let fmtp = fmtp.ok_or_else(|| format_err!(
+                    "expected out-of-band parameter set for H.264 stream"))?;
+                parameters = Some(Parameters::H264(
+                    crate::client::video::h264::Parameters::from_format_specific_params(fmtp)?));
+            }
+        },
+        "audio" => {
+            if encoding_name == "mpeg4-generic" {
+                let fmtp = fmtp.ok_or_else(|| format_err!(
+                    "expected out-of-band parameter set for AAC stream"))?;
+                parameters = Some(Parameters::Aac(
+                    crate::client::audio::aac::Parameters::from_format_specific_params(fmtp)?));
+            }
+        },
+        "application" => {
+            if let Some(p) = crate::client::application::onvif::Parameters::from(&encoding_name) {
+                parameters = Some(Parameters::Onvif(p));
+            }
         }
-        // This isn't an RFC 6184 requirement, but it makes things
-        // easier, and I haven't yet encountered a camera which doesn't
-        // specify out-of-band parameters.
-        let fmtp = fmtp.ok_or_else(|| format_err!(
-            "expected out-of-band parameter set for H.264 stream"))?;
-        parameters = Some(Parameters::H264(
-            crate::client::video::h264::Parameters::from_format_specific_params(fmtp)?));
-    } else if media == "audio" && encoding_name.eq_ignore_ascii_case("mpeg4-generic") {
-        let fmtp = fmtp.ok_or_else(|| format_err!(
-            "expected out-of-band parameter set for AAC stream"))?;
-        parameters = Some(Parameters::Aac(
-            crate::client::audio::aac::Parameters::from_format_specific_params(fmtp)?));
+        _ => {},
     }
 
     Ok(Stream {
         media,
-        encoding_name: encoding_name.to_owned(),
+        encoding_name,
         clock_rate,
         rtp_payload_type,
         parameters,

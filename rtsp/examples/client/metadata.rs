@@ -1,43 +1,31 @@
-use async_trait::async_trait;
-use bytes::Bytes;
 use failure::{Error, format_err};
 use futures::StreamExt;
 use log::info;
-use moonfire_rtsp::client::{PacketItem, application::onvif::MessageHandler};
+use moonfire_rtsp::client::DemuxedItem;
 use rtsp_types::Url;
-
-struct MessagePrinter;
-
-#[async_trait]
-impl MessageHandler for MessagePrinter {
-    async fn message(&mut self, timestamp: moonfire_rtsp::Timestamp, msg: Bytes) -> Result<(), failure::Error> {
-        info!("{}: {}\n", &timestamp, std::str::from_utf8(&msg[..]).unwrap());
-        Ok(())
-    }
-}
 
 pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credentials>) -> Result<(), Error> {
     let stop = tokio::signal::ctrl_c();
 
     let mut session = moonfire_rtsp::client::Session::describe(url, credentials).await?;
     let onvif_stream_i = session.streams().iter()
-        .position(|s| s.media == "application" && s.encoding_name == "vnd.onvif.metadata")
+        .position(|s| matches!(s.parameters, Some(moonfire_rtsp::client::Parameters::Onvif(..))))
         .ok_or_else(|| format_err!("couldn't find onvif stream"))?;
     session.setup(onvif_stream_i).await?;
-    let session = session.play().await?.pkts();
+    let session = session.play().await?.demuxed()?;
 
     // Read RTP data.
-    let mut onvifer = moonfire_rtsp::client::application::onvif::Handler::new(MessagePrinter);
     tokio::pin!(session);
     tokio::pin!(stop);
     loop {
         tokio::select! {
-            pkt = session.next() => {
-                let pkt = match pkt.ok_or_else(|| format_err!("EOF"))?? {
-                    PacketItem::RtpPacket(p) => p,
-                    PacketItem::SenderReport(_) => continue,
+            item = session.next() => {
+                match item.ok_or_else(|| format_err!("EOF"))?? {
+                    DemuxedItem::Message(m) => {
+                        info!("{}: {}\n", &m.timestamp, std::str::from_utf8(&m.data[..]).unwrap());
+                    },
+                    _ => continue,
                 };
-                onvifer.pkt(pkt).await?;
             },
             _ = &mut stop => {
                 break;

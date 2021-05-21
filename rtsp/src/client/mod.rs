@@ -43,7 +43,8 @@ pub struct Stream {
     pub media: String,
 
     /// An encoding name, as specified in the [IANA media type
-    /// registry](https://www.iana.org/assignments/media-types/media-types.xhtml).
+    /// registry](https://www.iana.org/assignments/media-types/media-types.xhtml), with
+    /// ASCII characters in lowercase.
     ///
     /// Commonly used but not specified in that registry: the ONVIF types
     /// claimed in the
@@ -80,6 +81,7 @@ pub struct Stream {
 pub enum Parameters {
     H264(video::h264::Parameters),
     Aac(audio::aac::Parameters),
+    Onvif(application::onvif::Parameters),
 }
 
 #[derive(Debug)]
@@ -569,6 +571,7 @@ pub enum DemuxedItem {
     ParameterChange(video::h264::Parameters),
     Picture(video::Picture),
     AudioFrame(audio::aac::Frame),
+    Message(application::onvif::Message),
     SenderReport(rtp::SenderReport),
 }
 
@@ -595,6 +598,7 @@ impl Session<Playing> {
                         None => bail!("no demuxer for {} stream", s.encoding_name),
                         Some(Parameters::H264(h264)) => Ok(Some(video::h264::Demuxer::new(h264))),
                         Some(Parameters::Aac(aac)) => Ok(Some(audio::aac::Demuxer::new(aac))),
+                        Some(Parameters::Onvif(_)) => Ok(Some(application::onvif::Demuxer::new())),
                     }
                 },
                 _ => Ok(None),
