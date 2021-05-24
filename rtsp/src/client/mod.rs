@@ -29,6 +29,7 @@ pub const KEEPALIVE_DURATION: std::time::Duration = std::time::Duration::from_se
 pub struct Presentation {
     pub streams: Vec<Stream>,
     pub base_url: Url,
+    pub alt_base_url: Url,
     pub control: Url,
     pub accept_dynamic_rate: bool,
     sdp: SessionDescription,
@@ -73,6 +74,11 @@ pub struct Stream {
     /// This is needed to send `SETUP` requests and interpret the `PLAY`
     /// response's `RTP-Info` header.
     pub control: Url,
+
+    /// Alternate control URL.
+    /// Some buggy servers expect the client to treat the base URL as if it had
+    /// an implicit trailing slash.
+    pub alt_control: Url,
 
     state: StreamState,
 }
