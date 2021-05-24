@@ -329,26 +329,6 @@ pub struct Session<S: State> {
     state: S,
 }
 
-/// Converts from an RTSP method to a digest method.
-/// Unfortunately all [digest_auth::HttpMethod]s have to be `&'static`, where all the other parameters are `Cow`.
-/// Therefore extension methods aren't supported for now.
-fn http_method(method: &rtsp_types::Method) -> Result<digest_auth::HttpMethod, Error> {
-    use rtsp_types::Method;
-    Ok(digest_auth::HttpMethod::OTHER(match method {
-        Method::Describe => "DESCRIBE",
-        Method::GetParameter => "GET_PARAMETER",
-        Method::Options => "OPTIONS",
-        Method::Pause => "PAUSE",
-        Method::Play => "PLAY",
-        Method::PlayNotify => "PLAY_NOTIFY",
-        Method::Redirect => "REDIRECT",
-        Method::Setup => "SETUP",
-        Method::SetParameter => "SET_PARAMETER",
-        Method::Teardown => "TEARDOWN",
-        Method::Extension(m) => bail!("can't authenticate with method {:?}", &m),
-    }))
-}
-
 impl RtspConnection {
     async fn connect(url: &Url, creds: Option<Credentials>) -> Result<Self, Error> {
         if url.scheme() != "rtsp" {
@@ -426,8 +406,9 @@ impl RtspConnection {
             (None, _) => {},
             (Some(auth), Some(creds)) => {
                 let uri = req.request_uri().map(|u| u.as_str()).unwrap_or("*");
+                let method = digest_auth::HttpMethod::OTHER(req.method().into());
                 let ctx = digest_auth::AuthContext::new_with_method(
-                    &creds.username, &creds.password, uri, Option::<&'static [u8]>::None, http_method(req.method())?);
+                    &creds.username, &creds.password, uri, Option::<&'static [u8]>::None, method);
                 let authorization = auth.respond(&ctx)?.to_string();
                 req.insert_header(rtsp_types::headers::AUTHORIZATION, authorization);
             },
