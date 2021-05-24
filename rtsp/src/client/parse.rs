@@ -23,7 +23,7 @@ struct StaticPayloadType {
 /// The registry is officially closed, so this list should never change.
 static STATIC_PAYLOAD_TYPES: [Option<StaticPayloadType>; 35] = [
     /* 0 */ Some(StaticPayloadType {
-        encoding: "PCMU",
+        encoding: "pcmu",
         media: "audio",
         clock_rate: 8_000,
         channels: NonZeroU16::new(1),
@@ -31,97 +31,97 @@ static STATIC_PAYLOAD_TYPES: [Option<StaticPayloadType>; 35] = [
     /* 1 */ None, // reserved
     /* 2 */ None, // reserved
     /* 3 */ Some(StaticPayloadType {
-        encoding: "GSM",
+        encoding: "gsm",
         media: "audio",
         clock_rate: 8_000,
         channels: NonZeroU16::new(1),
     }),
     /* 4 */ Some(StaticPayloadType {
-        encoding: "G723",
+        encoding: "g723",
         media: "audio",
         clock_rate: 8_000,
         channels: NonZeroU16::new(1),
     }),
     /* 5 */ Some(StaticPayloadType {
-        encoding: "DVI4",
+        encoding: "dvi4",
         media: "audio",
         clock_rate: 8_000,
         channels: NonZeroU16::new(1),
     }),
     /* 6 */ Some(StaticPayloadType {
-        encoding: "DVI4",
+        encoding: "dvi4",
         media: "audio",
         clock_rate: 16_000,
         channels: NonZeroU16::new(1),
     }),
     /* 7 */ Some(StaticPayloadType {
-        encoding: "LPC",
+        encoding: "lpc",
         media: "audio",
         clock_rate: 8_000,
         channels: NonZeroU16::new(1),
     }),
     /* 8 */ Some(StaticPayloadType {
-        encoding: "PCMA",
+        encoding: "pcma",
         media: "audio",
         clock_rate: 8_000,
         channels: NonZeroU16::new(1),
     }),
     /* 9 */ Some(StaticPayloadType {
-        encoding: "G722",
+        encoding: "g722",
         media: "audio",
         clock_rate: 8_000,
         channels: NonZeroU16::new(1),
     }),
     /* 10 */ Some(StaticPayloadType {
-        encoding: "L16",
+        encoding: "l16",
         media: "audio",
         clock_rate: 441_000,
         channels: NonZeroU16::new(2),
     }),
     /* 11 */ Some(StaticPayloadType {
-        encoding: "L16",
+        encoding: "l16",
         media: "audio",
         clock_rate: 441_000,
         channels: NonZeroU16::new(1),
     }),
     /* 12 */ Some(StaticPayloadType {
-        encoding: "QCELP",
+        encoding: "qcelp",
         media: "audio",
         clock_rate: 8_000,
         channels: NonZeroU16::new(1),
     }),
     /* 13 */ Some(StaticPayloadType {
-        encoding: "CN",
+        encoding: "cn",
         media: "audio",
         clock_rate: 8_000,
         channels: NonZeroU16::new(1),
     }),
     /* 14 */ Some(StaticPayloadType {
-        encoding: "MPA",
+        encoding: "mpa",
         media: "audio",
         clock_rate: 90_000,
         channels: None,
     }),
     /* 15 */ Some(StaticPayloadType {
-        encoding: "G728",
+        encoding: "g728",
         media: "audio",
         clock_rate: 8_000,
         channels: NonZeroU16::new(1),
     }),
     /* 16 */ Some(StaticPayloadType {
-        encoding: "DVI4",
+        encoding: "dvi4",
         media: "audio",
         clock_rate: 11_025,
         channels: NonZeroU16::new(1),
     }),
     /* 17 */ Some(StaticPayloadType {
-        encoding: "DVI4",
+        encoding: "dvi4",
         media: "audio",
         clock_rate: 22_050,
         channels: NonZeroU16::new(1),
     }),
     /* 18 */ Some(StaticPayloadType {
-        encoding: "G729",
+        encoding: "g729",
         media: "audio",
         clock_rate: 8_000,
         channels: NonZeroU16::new(1),
@@ -133,13 +133,13 @@ static STATIC_PAYLOAD_TYPES: [Option<StaticPayloadType>; 35] = [
     /* 23 */ None, // unassigned
     /* 24 */ None, // unassigned
     /* 25 */ Some(StaticPayloadType {
-        encoding: "CelB",
+        encoding: "celb",
         media: "video",
         clock_rate: 90_000,
         channels: None,
     }),
     /* 26 */ Some(StaticPayloadType {
-        encoding: "JPEG",
+        encoding: "jpeg",
         media: "video",
         clock_rate: 90_000,
         channels: None,
@@ -154,19 +154,19 @@ static STATIC_PAYLOAD_TYPES: [Option<StaticPayloadType>; 35] = [
     /* 29 */ None, // unassigned
     /* 30 */ None, // unassigned
     /* 31 */ Some(StaticPayloadType {
-        encoding: "H261",
+        encoding: "h261",
         media: "video",
         clock_rate: 90_000,
         channels: None,
     }),
     /* 32 */ Some(StaticPayloadType {
-        encoding: "MPV",
+        encoding: "mpv",
         media: "video",
         clock_rate: 90_000,
         channels: None,
     }),
     /* 33 */ Some(StaticPayloadType {
-        encoding: "MP2T",
+        encoding: "mp2t",
         // The RTP parameters registry says type AV (audio and video).
         // The MIME registration says the media type is "video".
         // https://datatracker.ietf.org/doc/html/rfc3555#section-4.2.9
@@ -175,7 +175,7 @@ static STATIC_PAYLOAD_TYPES: [Option<StaticPayloadType>; 35] = [
         channels: None,
     }),
     /* 34 */ Some(StaticPayloadType {
-        encoding: "H263",
+        encoding: "h263",
         media: "video",
         clock_rate: 90_000,
         channels: None,
@@ -557,7 +557,7 @@ mod tests {
         // H.264 video stream.
         assert_eq!(p.streams[0].control.as_str(), &(prefix.to_string() + "trackID=0"));
         assert_eq!(p.streams[0].media, "video");
-        assert_eq!(p.streams[0].encoding_name, "H264");
+        assert_eq!(p.streams[0].encoding_name, "h264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
         assert_eq!(p.streams[0].clock_rate, 90_000);
         match p.streams[0].parameters.as_ref().unwrap() {
@@ -573,7 +573,7 @@ mod tests {
         // .mp4 audio stream.
         assert_eq!(p.streams[1].control.as_str(), &(prefix.to_string() + "trackID=1"));
         assert_eq!(p.streams[1].media, "audio");
-        assert_eq!(p.streams[1].encoding_name, "MPEG4-GENERIC");
+        assert_eq!(p.streams[1].encoding_name, "mpeg4-generic");
         assert_eq!(p.streams[1].rtp_payload_type, 97);
         assert_eq!(p.streams[1].clock_rate, 48_000);
         match p.streams[1].parameters {
@@ -587,7 +587,7 @@ mod tests {
         assert_eq!(p.streams[2].encoding_name, "vnd.onvif.metadata");
         assert_eq!(p.streams[2].rtp_payload_type, 107);
         assert_eq!(p.streams[2].clock_rate, 90_000);
-        assert!(p.streams[2].parameters.is_none());
+        assert!(matches!(p.streams[2].parameters, Some(crate::client::Parameters::Onvif(_))));
 
         // SETUP.
         let setup_response = response(include_bytes!("testdata/dahua_setup.txt"));
@@ -625,11 +625,11 @@ mod tests {
         // Abridged test; similar to the other Dahua test.
         assert_eq!(p.streams.len(), 2);
         assert_eq!(p.streams[0].media, "video");
-        assert_eq!(p.streams[0].encoding_name, "H265");
+        assert_eq!(p.streams[0].encoding_name, "h265");
         assert_eq!(p.streams[0].rtp_payload_type, 98);
         assert!(p.streams[1].parameters.is_none());
         assert_eq!(p.streams[1].media, "audio");
-        assert_eq!(p.streams[1].encoding_name, "PCMA");
+        assert_eq!(p.streams[1].encoding_name, "pcma");
         assert_eq!(p.streams[1].rtp_payload_type, 8);
         assert!(p.streams[1].parameters.is_none());
     }
@@ -652,7 +652,7 @@ mod tests {
         assert_eq!(p.streams[0].control.as_str(),
                    &(prefix.to_string() + "/trackID=1?transportmode=unicast&profile=Profile_1"));
         assert_eq!(p.streams[0].media, "video");
-        assert_eq!(p.streams[0].encoding_name, "H264");
+        assert_eq!(p.streams[0].encoding_name, "h264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
         assert_eq!(p.streams[0].clock_rate, 90_000);
         match p.streams[0].parameters.as_ref().unwrap() {
@@ -672,7 +672,7 @@ mod tests {
         assert_eq!(p.streams[1].encoding_name, "vnd.onvif.metadata");
         assert_eq!(p.streams[1].rtp_payload_type, 107);
         assert_eq!(p.streams[1].clock_rate, 90_000);
-        assert!(p.streams[1].parameters.is_none());
+        assert!(matches!(p.streams[1].parameters, Some(crate::client::Parameters::Onvif(_))));
 
         // SETUP.
         let setup_response = response(include_bytes!("testdata/hikvision_setup.txt"));
@@ -716,7 +716,7 @@ mod tests {
         // H.264 video stream.
         assert_eq!(p.streams[0].control.as_str(), &(base.to_string() + "trackID=1"));
         assert_eq!(p.streams[0].media, "video");
-        assert_eq!(p.streams[0].encoding_name, "H264");
+        assert_eq!(p.streams[0].encoding_name, "h264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
         assert_eq!(p.streams[0].clock_rate, 90_000);
         match p.streams[0].parameters.as_ref().unwrap() {
@@ -732,7 +732,7 @@ mod tests {
         // audio stream
         assert_eq!(p.streams[1].control.as_str(), &(base.to_string() + "trackID=2"));
         assert_eq!(p.streams[1].media, "audio");
-        assert_eq!(p.streams[1].encoding_name, "MPEG4-GENERIC");
+        assert_eq!(p.streams[1].encoding_name, "mpeg4-generic");
         assert_eq!(p.streams[1].rtp_payload_type, 97);
         assert_eq!(p.streams[1].clock_rate, 16_000);
         match p.streams[1].parameters {
@@ -798,7 +798,7 @@ mod tests {
         // H.264 video stream.
         assert_eq!(p.streams[1].control.as_str(), &(prefix.to_string() + "/trackID=2"));
         assert_eq!(p.streams[1].media, "video");
-        assert_eq!(p.streams[1].encoding_name, "H264");
+        assert_eq!(p.streams[1].encoding_name, "h264");
         assert_eq!(p.streams[1].rtp_payload_type, 97);
         assert_eq!(p.streams[1].clock_rate, 90_000);
         match p.streams[1].parameters.as_ref().unwrap() {
@@ -848,7 +848,7 @@ mod tests {
         // H.264 video stream.
         assert_eq!(p.streams[0].control.as_str(), &(prefix.to_string() + "/track1"));
         assert_eq!(p.streams[0].media, "video");
-        assert_eq!(p.streams[0].encoding_name, "H264");
+        assert_eq!(p.streams[0].encoding_name, "h264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
         assert_eq!(p.streams[0].clock_rate, 90_000);
         match p.streams[0].parameters.as_ref().unwrap() {
@@ -864,7 +864,7 @@ mod tests {
         // audio stream
         assert_eq!(p.streams[1].control.as_str(), &(prefix.to_string() + "/track2"));
         assert_eq!(p.streams[1].media, "audio");
-        assert_eq!(p.streams[1].encoding_name, "PCMU");
+        assert_eq!(p.streams[1].encoding_name, "pcmu");
         assert_eq!(p.streams[1].rtp_payload_type, 0);
         assert_eq!(p.streams[1].clock_rate, 8_000);
         assert_eq!(p.streams[1].channels, NonZeroU16::new(1));
