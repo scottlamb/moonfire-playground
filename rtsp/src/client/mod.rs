@@ -1,4 +1,4 @@
-use std::{fmt::Debug, num::{NonZeroU16, NonZeroU8}, pin::Pin};
+use std::{borrow::Cow, fmt::Debug, num::{NonZeroU16, NonZeroU8}, pin::Pin};
 
 use async_stream::try_stream;
 use bytes::Bytes;
@@ -412,7 +412,7 @@ impl RtspConnection {
             (None, _) => {},
             (Some(auth), Some(creds)) => {
                 let uri = req.request_uri().map(|u| u.as_str()).unwrap_or("*");
-                let method = digest_auth::HttpMethod::OTHER(req.method().into());
+                let method = digest_auth::HttpMethod(Cow::Borrowed(req.method().into()));
                 let ctx = digest_auth::AuthContext::new_with_method(
                     &creds.username, &creds.password, uri, Option::<&'static [u8]>::None, method);
                 let authorization = auth.respond(&ctx)?.to_string();

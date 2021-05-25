@@ -205,7 +205,7 @@ dependencies = [
  "bstr",
  "bytes",
  "cstr",
- "digest_auth 0.2.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "digest_auth",
  "failure",
  "fnv",
  "futures",
@@ -419,21 +419,9 @@ dependencies = [
 
 [[package]]
 name = "digest_auth"
-version = "0.2.4"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12fd5e24649b07f360f59a1e0a522d775540e2bc4b88f8d2657bcf8ca0360d74"
-dependencies = [
- "digest",
- "hex",
- "md-5",
- "rand",
- "sha2",
-]
-
-[[package]]
-name = "digest_auth"
-version = "0.2.4"
-source = "git+https://git.ondrovo.com/slamb/digest_auth_rs.git?branch=pr-method-lifetime#2e61615da02329b97ea18d2e00d238d8fc43198b"
+checksum = "fa30657988b2ced88f68fe490889e739bf98d342916c33ed3100af1d6f1cbc9c"
 dependencies = [
  "digest",
  "hex",
@@ -1077,7 +1065,7 @@ dependencies = [
  "base64",
  "bitreader",
  "bytes",
- "digest_auth 0.2.4 (git+https://git.ondrovo.com/slamb/digest_auth_rs.git?branch=pr-method-lifetime)",
+ "digest_auth",
  "failure",
  "futures",
  "h264-reader 0.4.0 (git+https://github.com/dholroyd/h264-reader)",
