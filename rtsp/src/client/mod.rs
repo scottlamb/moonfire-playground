@@ -488,10 +488,10 @@ impl Session<Described> {
         debug!("SETUP response: {:#?}", &response);
         let response = parse::parse_setup(&response)?;
         match self.state.session_id.as_ref() {
-            Some(old) if old != response.session_id => {
-                bail!("SETUP response changed session id from {:?} to {:?}",
-                    old, response.session_id);
-            },
+            //Some(old) if old != response.session_id => {
+            //    bail!("SETUP response changed session id from {:?} to {:?}",
+            //        old, response.session_id);
+            //},
             Some(_) => {},
             None => self.state.session_id = Some(response.session_id.to_owned()),
         };

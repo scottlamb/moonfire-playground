@@ -72,6 +72,17 @@ impl StrictSequenceChecker {
 
     pub(super) fn process(&mut self, rtsp_ctx: crate::Context, timeline: &mut super::Timeline,
                           stream_id: usize, mut data: Bytes) -> Result<Packet, Error> {
+        // Terrible hack to try to make sense of the GW Security GW4089IP's audio stream.
+        // It appears to have one RTSP interleaved message wrapped in another. RTP and RTCP
+        // packets can never start with '$', so this shouldn't interfere with well-behaved
+        // servers.
+        if data.len() > 4 && data[0] == b'$'
+           && usize::from(u16::from_be_bytes([data[2], data[3]])) == data.len() - 4 
+        {
+            log::debug!("stripping extra interleaved data header");
+            data.advance(4);
+        }
+
         let reader = rtp_rs::RtpReader::new(&data[..])
             .map_err(|e| format_err!("corrupt RTP header while expecting seq={:04x?} at {:#?}: {:?}",
                                      self.next_seq, &rtsp_ctx, e))?;

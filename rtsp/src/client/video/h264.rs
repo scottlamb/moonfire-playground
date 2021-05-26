@@ -216,7 +216,7 @@ impl client::Demuxer for Demuxer {
         let picture = pending.picture.ok_or_else(|| format_err!("access unit has no picture"))?;
         let nal_header = h264_reader::nal::NalHeader::new(picture[0]).expect("nal header was previously valid");
         Ok(Some(client::DemuxedItem::Picture(Picture {
-            rtp_timestamp: pending.timestamp,
+            timestamp: pending.timestamp,
             stream_id: pending.stream_id,
             is_random_access_point: nal_header.nal_unit_type() == UnitType::SliceLayerWithoutPartitioningIdr,
             is_disposable: nal_header.nal_ref_idc() == 0,

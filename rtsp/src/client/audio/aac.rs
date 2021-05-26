@@ -374,6 +374,7 @@ impl std::fmt::Debug for Parameters {
 
 pub struct Frame {
     pub ctx: crate::Context,
+    pub stream_id: usize,
     pub timestamp: crate::Timestamp,
     pub data: Bytes,
 }
@@ -381,6 +382,7 @@ pub struct Frame {
 impl Debug for Frame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("aac::Frame")
+         .field("stream_id", &self.stream_id)
          .field("timestamp", &self.timestamp)
          .field("data", &self.data.hex_dump())
          .finish()
@@ -394,6 +396,8 @@ pub(crate) struct Demuxer {
 
 struct Aggregate {
     ctx: crate::Context,
+
+    stream_id: usize,
 
     /// The RTP-level timestamp; frame `i` is at timestamp `timestamp + frame_length*i`.
     timestamp: crate::Timestamp,
@@ -484,6 +488,7 @@ impl crate::client::Demuxer for Demuxer {
                         println!("au {}: len-{}, fragmented", &pkt.timestamp, size);
                         self.state = DemuxerState::Ready(Frame {
                             ctx: pkt.rtsp_ctx,
+                            stream_id: pkt.stream_id,
                             timestamp: pkt.timestamp,
                             data: std::mem::take(&mut frag.buf).freeze(),
                         });
@@ -498,6 +503,7 @@ impl crate::client::Demuxer for Demuxer {
                 }
                 self.state = DemuxerState::Aggregated(Aggregate {
                     ctx: pkt.rtsp_ctx,
+                    stream_id: pkt.stream_id,
                     timestamp: pkt.timestamp,
                     buf: pkt.payload,
                     frame_i: 0,
@@ -554,6 +560,7 @@ impl crate::client::Demuxer for Demuxer {
                 }
                 let frame = Frame {
                     ctx: agg.ctx,
+                    stream_id: agg.stream_id,
                     timestamp: agg.timestamp.try_add(u64::from(agg.frame_i) * u64::from(self.params.config.frame_length))?,
                     data: agg.buf.slice(agg.data_off..agg.data_off+size),
                 };

@@ -2,6 +2,7 @@
 
 mod metadata;
 mod mp4;
+mod timestats;
 
 use failure::Error;
 use log::{error, info};
@@ -37,6 +38,11 @@ enum Cmd {
     },
 
     Metadata {
+        #[structopt(flatten)]
+        src: Source,
+    },
+
+    Timestats {
         #[structopt(flatten)]
         src: Source,
     },
@@ -100,5 +106,6 @@ async fn main_inner() -> Result<(), Error> {
         Cmd::Mp4 { out, src, no_video, no_audio } => mp4::run(
             src.url, creds(src.username, src.password), no_video, no_audio, out).await,
         Cmd::Metadata { src } => metadata::run(src.url, creds(src.username, src.password)).await,
+        Cmd::Timestats { src } => timestats::run(src.url, creds(src.username, src.password)).await,
     }
 }

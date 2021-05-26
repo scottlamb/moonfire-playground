@@ -33,7 +33,7 @@ pub trait Parameters : Clone + std::fmt::Debug {
 /// picture, or approximated via the frame rate.
 pub struct Picture {
     /// This picture's timestamp in the time base associated with the stream.
-    pub rtp_timestamp: crate::Timestamp,
+    pub timestamp: crate::Timestamp,
 
     pub stream_id: usize,
 
@@ -62,7 +62,7 @@ impl std::fmt::Debug for Picture {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         //use pretty_hex::PrettyHex;
         f.debug_struct("Picture")
-         .field("rtp_timestamp", &self.rtp_timestamp)
+         .field("rtp_timestamp", &self.timestamp)
          .field("is_random_access_point", &self.is_random_access_point)
          .field("is_disposable", &self.is_disposable)
          .field("pos", &self.pos)

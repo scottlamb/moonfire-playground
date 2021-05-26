@@ -431,9 +431,9 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
     }
 
     async fn picture(&mut self, mut picture: moonfire_rtsp::client::video::Picture) -> Result<(), failure::Error> {
-        println!("{}: {}-byte picture", &picture.rtp_timestamp, picture.remaining());
+        println!("{}: {}-byte picture", &picture.timestamp, picture.remaining());
         let size = u32::try_from(picture.remaining())?;
-        self.video_trak.add_sample(self.mdat_pos, size, picture.rtp_timestamp)?;
+        self.video_trak.add_sample(self.mdat_pos, size, picture.timestamp)?;
         self.mdat_pos = self.mdat_pos.checked_add(size).ok_or_else(|| format_err!("mdat_pos overflow"))?;
         if picture.is_random_access_point {
             self.video_sync_sample_nums.push(u32::try_from(self.video_trak.samples)?);
