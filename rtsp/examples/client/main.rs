@@ -75,8 +75,7 @@ fn init_logging() -> mylog::Handle {
 #[tokio::main]
 async fn main() {
     let mut h = init_logging();
-    let _a = h.async_scope();
-    if let Err(e) = main_inner().await {
+    if let Err(e) = { let _a = h.async_scope(); main_inner().await } {
         error!("Fatal: {}", prettify_failure(&e));
         std::process::exit(1);
     }
