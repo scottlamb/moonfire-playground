@@ -57,12 +57,12 @@ const MAX_INITIAL_SEQ_SKIP: u16 = 128;
 #[derive(Debug)]
 pub(super) struct StrictSequenceChecker {
     ssrc: Option<u32>,
-    next_seq: u16,
+    next_seq: Option<u16>,
     max_seq_skip: u16,
 }
 
 impl StrictSequenceChecker {
-    pub(super) fn new(ssrc: Option<u32>, next_seq: u16) -> Self {
+    pub(super) fn new(ssrc: Option<u32>, next_seq: Option<u16>) -> Self {
         Self {
             ssrc,
             next_seq,
@@ -73,7 +73,7 @@ impl StrictSequenceChecker {
     pub(super) fn process(&mut self, rtsp_ctx: crate::Context, timeline: &mut super::Timeline,
                           stream_id: usize, mut data: Bytes) -> Result<Packet, Error> {
         let reader = rtp_rs::RtpReader::new(&data[..])
-            .map_err(|e| format_err!("corrupt RTP header while expecting seq={:04x} at {:#?}: {:?}",
+            .map_err(|e| format_err!("corrupt RTP header while expecting seq={:04x?} at {:#?}: {:?}",
                                      self.next_seq, &rtsp_ctx, e))?;
         let sequence_number = u16::from_be_bytes([data[2], data[3]]); // I don't like rtsp_rs::Seq.
         let timestamp = match timeline.advance_to(reader.timestamp()) {
@@ -83,8 +83,10 @@ impl StrictSequenceChecker {
         };
         let ssrc = reader.ssrc();
         if (self.ssrc != None && self.ssrc != Some(ssrc))
-           || sequence_number.wrapping_sub(self.next_seq) > self.max_seq_skip {
-            bail!("Expected ssrc={:08x?} seq={:04x} got ssrc={:08x} seq={:04x} ts={} at {:#?}",
+           || matches!(self.next_seq, Some(s)
+                       if sequence_number.wrapping_sub(s) > self.max_seq_skip)
+        {
+            bail!("Expected ssrc={:08x?} seq={:04x?} got ssrc={:08x} seq={:04x} ts={} at {:#?}",
                   self.ssrc, self.next_seq, ssrc, sequence_number, timestamp, &rtsp_ctx);
         }
         self.ssrc = Some(ssrc);
@@ -95,7 +97,7 @@ impl StrictSequenceChecker {
                if mark { "   " } else { "(M)"}, &timestamp, payload_range.len());
         data.truncate(payload_range.end);
         data.advance(payload_range.start);
-        self.next_seq = sequence_number.wrapping_add(1);
+        self.next_seq = Some(sequence_number.wrapping_add(1));
         self.max_seq_skip = 0;
         return Ok(Packet {
             stream_id,

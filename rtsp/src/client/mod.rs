@@ -28,7 +28,7 @@ pub const KEEPALIVE_DURATION: std::time::Duration = std::time::Duration::from_se
 #[derive(Debug)]
 pub struct Presentation {
     pub streams: Vec<Stream>,
-    pub base_url: Url,
+    base_url: Url,
     pub control: Url,
     pub accept_dynamic_rate: bool,
     sdp: SessionDescription,
@@ -75,6 +75,12 @@ pub struct Stream {
     /// [RFC 2326 section C.3](https://datatracker.ietf.org/doc/html/rfc2326#appendix-C.3)
     /// says the server is allowed to omit it when there is only a single stream.
     pub control: Option<Url>,
+
+    /// Some buggy cameras expect the base URL to be interpreted as if it had an
+    /// implicit trailing slash. (This is approximately what ffmpeg 4.3.1 does
+    /// when the base URL has a query string.) If `RTP-Info` matching fails, try
+    /// again with this URL.
+    alt_control: Option<Url>,
 
     state: StreamState,
 }
@@ -523,7 +529,7 @@ impl Session<Described> {
             match s.state {
                 StreamState::Init(StreamStateInit {
                     initial_rtptime,
-                    initial_seq: Some(initial_seq),
+                    initial_seq,
                     ssrc,
                     ..
                 }) => {
@@ -545,10 +551,6 @@ impl Session<Described> {
                         rtcp_handler: rtcp::TimestampPrinter::new(),
                     };
                 },
-                StreamState::Init(init) => bail!(
-                    "Expected seq to be specified, got {:#?} after PLAY response, \
-                    stream {} / {:#?}",
-                    init, i, s),
                 StreamState::Uninit => {},
                 StreamState::Playing{..} => unreachable!(),
             };

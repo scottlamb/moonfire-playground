@@ -211,6 +211,7 @@ pub(crate) fn split_once(str: &str, delimiter: char) -> Option<(&str, &str)> {
 /// the [MediaDescription] debug string.
 fn parse_media(
     base_url: &Url,
+    alt_base_url: &Url,
     media_description: &MediaDescription
 ) -> Result<Stream, Error> {
     let media = media_description.media_name.media.clone();
@@ -247,6 +248,7 @@ fn parse_media(
     let mut rtpmap = None;
     let mut fmtp = None;
     let mut control = None;
+    let mut alt_control = None;
     for a in &media_description.attributes {
         if a.key == "rtpmap" {
             let v = a.value.as_ref().ok_or_else(|| format_err!("rtpmap attribute with no value"))?;
@@ -273,6 +275,7 @@ fn parse_media(
             }
         } else if a.key == "control" {
             control = a.value.as_deref().map(|c| join_control(base_url, c)).transpose()?;
+            alt_control = a.value.as_deref().map(|c| join_control(alt_base_url, c)).transpose()?;
         }
     }
 
@@ -354,6 +357,7 @@ fn parse_media(
         rtp_payload_type,
         parameters,
         control,
+        alt_control,
         channels,
         state: super::StreamState::Uninit,
     })
@@ -380,6 +384,8 @@ pub(crate) fn parse_describe(request_url: Url, response: rtsp_types::Response<By
         .or_else(|| response.header(&rtsp_types::headers::CONTENT_LOCATION))
         .map(|v| Url::parse(v.as_str()))
         .unwrap_or(Ok(request_url))?;
+    let mut alt_base_url = base_url.clone();
+    alt_base_url.set_path(&format!("{}/", base_url.path()));
 
     let mut control = None;
     for a in &sdp.attributes {
@@ -393,7 +399,7 @@ pub(crate) fn parse_describe(request_url: Url, response: rtsp_types::Response<By
     let streams = sdp.media_descriptions
         .iter()
         .enumerate()
-        .map(|(i, m)| parse_media(&base_url, &m)
+        .map(|(i, m)| parse_media(&base_url, &alt_base_url, &m)
             .with_context(|_| format!("Unable to parse stream {}: {:#?}", i, &m))
             .map_err(Error::from))
         .collect::<Result<Vec<Stream>, Error>>()?;
@@ -402,8 +408,8 @@ pub(crate) fn parse_describe(request_url: Url, response: rtsp_types::Response<By
     
     Ok(Presentation {
         streams,
-        accept_dynamic_rate,
         base_url,
+        accept_dynamic_rate,
         control,
         sdp,
     })
@@ -474,22 +480,31 @@ pub(crate) fn parse_play(
             .strip_prefix("url=")
             .ok_or_else(|| format_err!("RTP-Info missing stream URL"))?;
         let url = join_control(&presentation.base_url, url)?;
-        let streams_len = presentation.streams.len();
-        let stream = presentation.streams
-            .iter_mut()
-            .find(|s| {
-                matches!(&s.control, Some(u) if u == &url) ||
+        let mut stream;
+        if presentation.streams.len() == 1 {
+            // The server is allowed to not specify a stream control URL for
+            // single-stream presentations. Additionally, some buggy
+            // cameras (eg the GW Security GW4089IP) use an incorrect URL.
+            // When there is a single stream in the presentation, there's no
+            // ambiguity. Be "forgiving", just as RFC 2326 section 14.3 asks
+            // servers to be forgiving of clients with single-stream
+            // containers.
+            // https://datatracker.ietf.org/doc/html/rfc2326#section-14.3
+            stream = Some(&mut presentation.streams[0]);
+        } else {
+            stream = presentation.streams
+                .iter_mut()
+                .find(|s| matches!(&s.control, Some(u) if u == &url));
 
-                // The server is allowed to not specify a control URL for
-                // single-stream presentations.  Additionally, some buggy
-                // cameras (eg the GW Security GW4089IP) use an incorrect URL.
-                // When there is a single stream in the presentation, there's no
-                // ambiguity. Be "forgiving", just as RFC 2326 section 14.3 asks
-                // servers to be forgiving of clients with single-stream
-                // containers.
-                // https://datatracker.ietf.org/doc/html/rfc2326#section-14.3
-                streams_len == 1
-            });
+            // If we didn't find a stream, try again with alt_control. Don't do
+            // this on the first pass because we should check all of the
+            // proper control URLs first.
+            if stream.is_none() {
+                stream = presentation.streams
+                    .iter_mut()
+                    .find(|s| matches!(&s.alt_control, Some(u) if u == &url));
+            }
+        }
         let stream = stream.ok_or_else(|| format_err!("can't find RTP-Info stream {}", url))?;
         let state = match &mut stream.state {
             super::StreamState::Uninit => {
@@ -888,12 +903,94 @@ mod tests {
         assert!(p.streams[1].parameters.is_none());
     }
 
-    /// [GW Security GW4089IP](https://github.com/scottlamb/moonfire-nvr/wiki/Cameras:-GW-Security#gw4089ip).
+    /// [GW Security GW4089IP](https://github.com/scottlamb/moonfire-nvr/wiki/Cameras:-GW-Security#gw4089ip),
+    /// main stream (high-res, audio).
     #[test]
-    fn gw() {
+    fn gw_main() {
+        // DESCRIBE.
+        let base = "rtsp://192.168.1.110:5050/H264?channel=1&subtype=0&unicast=true&proto=Onvif";
+        let mut p = parse_describe(base, include_bytes!("testdata/gw_main_describe.txt")).unwrap();
+        assert_eq!(p.control.as_str(), base);
+        assert!(!p.accept_dynamic_rate);
+
+        assert_eq!(p.streams.len(), 2);
+
+        // H.264 video stream.
+        assert_eq!(p.streams[0].control.as_ref().unwrap().as_str(), "rtsp://192.168.1.110:5050/video");
+        assert_eq!(p.streams[0].media, "video");
+        assert_eq!(p.streams[0].encoding_name, "h264");
+        assert_eq!(p.streams[0].rtp_payload_type, 96);
+        assert_eq!(p.streams[0].clock_rate, 90_000);
+        match p.streams[0].parameters.as_ref().unwrap() {
+            Parameters::H264(h264) => {
+                assert_eq!(h264.rfc6381_codec(), "avc1.4D002A");
+                assert_eq!(h264.pixel_dimensions(), (1920, 1080));
+                assert_eq!(h264.pixel_aspect_ratio(), None);
+                assert_eq!(h264.frame_rate(), None);
+            },
+            _ => panic!(),
+        }
+
+        // audio stream
+        assert_eq!(p.streams[1].control.as_ref().unwrap().as_str(), "rtsp://192.168.1.110:5050/audio");
+        assert_eq!(p.streams[1].media, "audio");
+        assert_eq!(p.streams[1].encoding_name, "pcmu"); // rtpmap wins over static list.
+        assert_eq!(p.streams[1].rtp_payload_type, 8);
+        assert_eq!(p.streams[1].clock_rate, 8_000);
+        assert_eq!(p.streams[1].channels, NonZeroU16::new(1));
+        assert!(p.streams[1].parameters.is_none());
+
+        // SETUP.
+        let setup_response = response(include_bytes!("testdata/gw_main_setup_video.txt"));
+        let setup_response = super::parse_setup(&setup_response).unwrap();
+        assert_eq!(setup_response.session_id, "9a90de54");
+        assert_eq!(setup_response.channel_id, 0);
+        assert_eq!(setup_response.ssrc, None);
+        p.streams[0].state = StreamState::Init(StreamStateInit {
+            ssrc: None,
+            initial_seq: None,
+            initial_rtptime: None,
+        });
+
+        let setup_response = response(include_bytes!("testdata/gw_main_setup_audio.txt"));
+        let setup_response = super::parse_setup(&setup_response).unwrap();
+        assert_eq!(setup_response.session_id, "9a90de54");
+        assert_eq!(setup_response.channel_id, 2);
+        assert_eq!(setup_response.ssrc, None);
+        p.streams[1].state = StreamState::Init(StreamStateInit {
+            ssrc: None,
+            initial_seq: None,
+            initial_rtptime: None,
+        });
+
+        // PLAY.
+        super::parse_play(
+            response(include_bytes!("testdata/gw_main_play.txt")),
+            &mut p
+        ).unwrap();
+        match &p.streams[0].state {
+            StreamState::Init(s) => {
+                assert_eq!(s.initial_seq, Some(271));
+                assert_eq!(s.initial_rtptime, Some(1621990950));
+            },
+            _ => panic!(),
+        };
+        match &p.streams[1].state {
+            StreamState::Init(s) => {
+                assert_eq!(s.initial_seq, None);
+                assert_eq!(s.initial_rtptime, None);
+            },
+            _ => panic!(),
+        };
+    }
+
+    /// [GW Security GW4089IP](https://github.com/scottlamb/moonfire-nvr/wiki/Cameras:-GW-Security#gw4089ip),
+    /// sub stream (low-res, no audio).
+    #[test]
+    fn gw_sub() {
         // DESCRIBE.
         let base = "rtsp://192.168.1.110:5049/H264?channel=1&subtype=1&unicast=true&proto=Onvif";
-        let mut p = parse_describe(base, include_bytes!("testdata/gw_describe.txt")).unwrap();
+        let mut p = parse_describe(base, include_bytes!("testdata/gw_sub_describe.txt")).unwrap();
         assert_eq!(p.control.as_str(), base);
         assert!(!p.accept_dynamic_rate);
 
@@ -916,7 +1013,7 @@ mod tests {
         }
 
         // SETUP.
-        let setup_response = response(include_bytes!("testdata/gw_setup.txt"));
+        let setup_response = response(include_bytes!("testdata/gw_sub_setup.txt"));
         let setup_response = super::parse_setup(&setup_response).unwrap();
         assert_eq!(setup_response.session_id, "9b0d0e54");
         assert_eq!(setup_response.channel_id, 0);
@@ -929,7 +1026,7 @@ mod tests {
 
         // PLAY.
         super::parse_play(
-            response(include_bytes!("testdata/gw_play.txt")),
+            response(include_bytes!("testdata/gw_sub_play.txt")),
             &mut p
         ).unwrap();
         match &p.streams[0].state {
