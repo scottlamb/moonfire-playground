@@ -211,7 +211,6 @@ pub(crate) fn split_once(str: &str, delimiter: char) -> Option<(&str, &str)> {
 /// the [MediaDescription] debug string.
 fn parse_media(
     base_url: &Url,
-    alt_base_url: &Url,
     media_description: &MediaDescription
 ) -> Result<Stream, Error> {
     let media = media_description.media_name.media.clone();
@@ -247,7 +246,7 @@ fn parse_media(
     // parameters (see Section 6.15)."
     let mut rtpmap = None;
     let mut fmtp = None;
-    let mut controls = None;
+    let mut control = None;
     for a in &media_description.attributes {
         if a.key == "rtpmap" {
             let v = a.value.as_ref().ok_or_else(|| format_err!("rtpmap attribute with no value"))?;
@@ -273,12 +272,9 @@ fn parse_media(
                 fmtp = Some(v);
             }
         } else if a.key == "control" {
-            controls = a.value.as_deref().map(|c| {
-                Ok::<_, Error>((join_control(base_url, c)?, join_control(alt_base_url, c)?))
-            }).transpose()?;
+            control = a.value.as_deref().map(|c| join_control(base_url, c)).transpose()?;
         }
     }
-    let (control, alt_control) = controls.ok_or_else(|| format_err!("no control url"))?;
 
     let encoding_name;
     let clock_rate;
@@ -358,7 +354,6 @@ fn parse_media(
         rtp_payload_type,
         parameters,
         control,
-        alt_control,
         channels,
         state: super::StreamState::Uninit,
     })
@@ -385,8 +380,6 @@ pub(crate) fn parse_describe(request_url: Url, response: rtsp_types::Response<By
         .or_else(|| response.header(&rtsp_types::headers::CONTENT_LOCATION))
         .map(|v| Url::parse(v.as_str()))
         .unwrap_or(Ok(request_url))?;
-    let mut alt_base_url = base_url.clone();
-    alt_base_url.set_path(&(base_url.path().to_owned() + "/"));
 
     let mut control = None;
     for a in &sdp.attributes {
@@ -400,7 +393,7 @@ pub(crate) fn parse_describe(request_url: Url, response: rtsp_types::Response<By
     let streams = sdp.media_descriptions
         .iter()
         .enumerate()
-        .map(|(i, m)| parse_media(&base_url, &alt_base_url, &m)
+        .map(|(i, m)| parse_media(&base_url, &m)
             .with_context(|_| format!("Unable to parse stream {}: {:#?}", i, &m))
             .map_err(Error::from))
         .collect::<Result<Vec<Stream>, Error>>()?;
@@ -411,7 +404,6 @@ pub(crate) fn parse_describe(request_url: Url, response: rtsp_types::Response<By
         streams,
         accept_dynamic_rate,
         base_url,
-        alt_base_url,
         control,
         sdp,
     })
@@ -482,20 +474,30 @@ pub(crate) fn parse_play(
             .strip_prefix("url=")
             .ok_or_else(|| format_err!("RTP-Info missing stream URL"))?;
         let url = join_control(&presentation.base_url, url)?;
-        let mut stream = presentation.streams
+        let streams_len = presentation.streams.len();
+        let stream = presentation.streams
             .iter_mut()
-            .find(|s| s.control == url);
-        if stream.is_none() {
-            stream = presentation.streams
-                .iter_mut()
-                .find(|s| s.alt_control == url);
-        }
+            .find(|s| {
+                matches!(&s.control, Some(u) if u == &url) ||
+
+                // The server is allowed to not specify a control URL for
+                // single-stream presentations.  Additionally, some buggy
+                // cameras (eg the GW Security GW4089IP) use an incorrect URL.
+                // When there is a single stream in the presentation, there's no
+                // ambiguity. Be "forgiving", just as RFC 2326 section 14.3 asks
+                // servers to be forgiving of clients with single-stream
+                // containers.
+                // https://datatracker.ietf.org/doc/html/rfc2326#section-14.3
+                streams_len == 1
+            });
         let stream = stream.ok_or_else(|| format_err!("can't find RTP-Info stream {}", url))?;
         let state = match &mut stream.state {
             super::StreamState::Uninit => {
-                // This appears to happen for Reolink devices. It also happens in some of other the
-                // tests here simply because I didn't include all the SETUP steps.
-                debug!("PLAY response described stream {} in Uninit state", &stream.control);
+                // This appears to happen for Reolink devices when we did not send a SETUP request
+                // for all streams. It also happens in some of other the tests
+                // here simply because I didn't include all the SETUP steps.
+                debug!("PLAY response described stream {} in Uninit state",
+                       stream.control.as_ref().unwrap_or(&presentation.control));
                 continue;
             },
             super::StreamState::Init(init) => init,
@@ -570,7 +572,7 @@ mod tests {
         assert_eq!(p.streams.len(), 3);
 
         // H.264 video stream.
-        assert_eq!(p.streams[0].control.as_str(), &(prefix.to_string() + "trackID=0"));
+        assert_eq!(p.streams[0].control.as_ref().unwrap().as_str(), &(prefix.to_string() + "trackID=0"));
         assert_eq!(p.streams[0].media, "video");
         assert_eq!(p.streams[0].encoding_name, "h264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
@@ -586,7 +588,7 @@ mod tests {
         }
 
         // .mp4 audio stream.
-        assert_eq!(p.streams[1].control.as_str(), &(prefix.to_string() + "trackID=1"));
+        assert_eq!(p.streams[1].control.as_ref().unwrap().as_str(), &(prefix.to_string() + "trackID=1"));
         assert_eq!(p.streams[1].media, "audio");
         assert_eq!(p.streams[1].encoding_name, "mpeg4-generic");
         assert_eq!(p.streams[1].rtp_payload_type, 97);
@@ -597,7 +599,7 @@ mod tests {
         }
 
         // ONVIF parameters stream.
-        assert_eq!(p.streams[2].control.as_str(), &(prefix.to_string() + "trackID=4"));
+        assert_eq!(p.streams[2].control.as_ref().unwrap().as_str(), &(prefix.to_string() + "trackID=4"));
         assert_eq!(p.streams[2].media, "application");
         assert_eq!(p.streams[2].encoding_name, "vnd.onvif.metadata");
         assert_eq!(p.streams[2].rtp_payload_type, 107);
@@ -664,7 +666,7 @@ mod tests {
         assert_eq!(p.streams.len(), 2);
 
         // H.264 video stream.
-        assert_eq!(p.streams[0].control.as_str(),
+        assert_eq!(p.streams[0].control.as_ref().unwrap().as_str(),
                    &(prefix.to_string() + "/trackID=1?transportmode=unicast&profile=Profile_1"));
         assert_eq!(p.streams[0].media, "video");
         assert_eq!(p.streams[0].encoding_name, "h264");
@@ -681,7 +683,7 @@ mod tests {
         }
 
         // ONVIF parameters stream.
-        assert_eq!(p.streams[1].control.as_str(),
+        assert_eq!(p.streams[1].control.as_ref().unwrap().as_str(),
                    &(prefix.to_string() + "/trackID=3?transportmode=unicast&profile=Profile_1"));
         assert_eq!(p.streams[1].media, "application");
         assert_eq!(p.streams[1].encoding_name, "vnd.onvif.metadata");
@@ -729,7 +731,7 @@ mod tests {
         assert_eq!(p.streams.len(), 2);
 
         // H.264 video stream.
-        assert_eq!(p.streams[0].control.as_str(), &(base.to_string() + "trackID=1"));
+        assert_eq!(p.streams[0].control.as_ref().unwrap().as_str(), &(base.to_string() + "trackID=1"));
         assert_eq!(p.streams[0].media, "video");
         assert_eq!(p.streams[0].encoding_name, "h264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
@@ -745,7 +747,7 @@ mod tests {
         };
 
         // audio stream
-        assert_eq!(p.streams[1].control.as_str(), &(base.to_string() + "trackID=2"));
+        assert_eq!(p.streams[1].control.as_ref().unwrap().as_str(), &(base.to_string() + "trackID=2"));
         assert_eq!(p.streams[1].media, "audio");
         assert_eq!(p.streams[1].encoding_name, "mpeg4-generic");
         assert_eq!(p.streams[1].rtp_payload_type, 97);
@@ -799,7 +801,7 @@ mod tests {
         assert_eq!(p.streams.len(), 2);
 
         // audio stream
-        assert_eq!(p.streams[0].control.as_str(), &(prefix.to_string() + "/trackID=1"));
+        assert_eq!(p.streams[0].control.as_ref().unwrap().as_str(), &(prefix.to_string() + "/trackID=1"));
         assert_eq!(p.streams[0].media, "audio");
         assert_eq!(p.streams[0].encoding_name, "mpeg4-generic");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
@@ -811,7 +813,7 @@ mod tests {
         }
 
         // H.264 video stream.
-        assert_eq!(p.streams[1].control.as_str(), &(prefix.to_string() + "/trackID=2"));
+        assert_eq!(p.streams[1].control.as_ref().unwrap().as_str(), &(prefix.to_string() + "/trackID=2"));
         assert_eq!(p.streams[1].media, "video");
         assert_eq!(p.streams[1].encoding_name, "h264");
         assert_eq!(p.streams[1].rtp_payload_type, 97);
@@ -861,7 +863,7 @@ mod tests {
         assert_eq!(p.streams.len(), 2);
 
         // H.264 video stream.
-        assert_eq!(p.streams[0].control.as_str(), &(prefix.to_string() + "/track1"));
+        assert_eq!(p.streams[0].control.as_ref().unwrap().as_str(), &(prefix.to_string() + "/track1"));
         assert_eq!(p.streams[0].media, "video");
         assert_eq!(p.streams[0].encoding_name, "h264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
@@ -877,7 +879,7 @@ mod tests {
         }
 
         // audio stream
-        assert_eq!(p.streams[1].control.as_str(), &(prefix.to_string() + "/track2"));
+        assert_eq!(p.streams[1].control.as_ref().unwrap().as_str(), &(prefix.to_string() + "/track2"));
         assert_eq!(p.streams[1].media, "audio");
         assert_eq!(p.streams[1].encoding_name, "pcmu");
         assert_eq!(p.streams[1].rtp_payload_type, 0);
@@ -898,7 +900,7 @@ mod tests {
         assert_eq!(p.streams.len(), 1);
 
         // H.264 video stream.
-        assert_eq!(p.streams[0].control.as_str(), "rtsp://192.168.1.110:5049/video");
+        assert_eq!(p.streams[0].control.as_ref().unwrap().as_str(), "rtsp://192.168.1.110:5049/video");
         assert_eq!(p.streams[0].media, "video");
         assert_eq!(p.streams[0].encoding_name, "h264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);

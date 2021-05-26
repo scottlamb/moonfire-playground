@@ -29,7 +29,6 @@ pub const KEEPALIVE_DURATION: std::time::Duration = std::time::Duration::from_se
 pub struct Presentation {
     pub streams: Vec<Stream>,
     pub base_url: Url,
-    pub alt_base_url: Url,
     pub control: Url,
     pub accept_dynamic_rate: bool,
     sdp: SessionDescription,
@@ -71,14 +70,11 @@ pub struct Stream {
     pub parameters: Option<Parameters>,
 
     /// The specified control URL.
-    /// This is needed to send `SETUP` requests and interpret the `PLAY`
-    /// response's `RTP-Info` header.
-    pub control: Url,
-
-    /// Alternate control URL.
-    /// Some buggy servers expect the client to treat the base URL as if it had
-    /// an implicit trailing slash.
-    pub alt_control: Url,
+    /// This is needed with multiple streams to send `SETUP` requests and
+    /// interpret the `PLAY` response's `RTP-Info` header.
+    /// [RFC 2326 section C.3](https://datatracker.ietf.org/doc/html/rfc2326#appendix-C.3)
+    /// says the server is allowed to omit it when there is only a single stream.
+    pub control: Option<Url>,
 
     state: StreamState,
 }
@@ -462,9 +458,10 @@ impl Session<Described> {
             bail!("stream already set up");
         }
         let proposed_channel_id = self.state.channels.next_unassigned()?;
+        let url = stream.control.as_ref().unwrap_or(&self.state.presentation.control).clone();
         let response = self.conn.send(
             &mut rtsp_types::Request::builder(rtsp_types::Method::Setup, rtsp_types::Version::V1_0)
-            .request_uri(stream.control.clone())
+            .request_uri(url)
             .header(
                 rtsp_types::headers::TRANSPORT,
                 format!(
