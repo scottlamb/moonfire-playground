@@ -18,8 +18,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use failure::{Error, bail, format_err};
 use futures::StreamExt;
 use log::info;
-use moonfire_rtsp::client::video::Parameters as _;
-use moonfire_rtsp::client::{DemuxedItem, audio::aac, video::h264};
+use moonfire_rtsp::codec::{CodecItem, AudioParameters, VideoParameters};
 
 use std::convert::TryFrom;
 use std::io::SeekFrom;
@@ -57,8 +56,8 @@ async fn write_all_buf<W: AsyncWrite + Unpin, B: Buf>(writer: &mut W, buf: &mut 
 pub struct Mp4Writer<W: AsyncWrite + AsyncSeek + Send + Unpin> {
     mdat_start: u32,
     mdat_pos: u32,
-    video_params: Option<h264::Parameters>,
-    audio_params: Option<aac::Parameters>,
+    video_params: Option<VideoParameters>,
+    audio_params: Option<AudioParameters>,
 
     /// The (1-indexed) video sample (frame) number of each sync sample (random access point).
     video_sync_sample_nums: Vec<u32>,
@@ -167,7 +166,7 @@ impl TrakTracker {
 }
 
 impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
-    pub async fn new(video_params: Option<h264::Parameters>, audio_params: Option<aac::Parameters>,
+    pub async fn new(video_params: Option<VideoParameters>, audio_params: Option<AudioParameters>,
                      mut inner: W) -> Result<Self, Error> {
         let mut buf = BytesMut::new();
         write_box!(&mut buf, b"ftyp", {
@@ -230,7 +229,7 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
         Ok(())
     }
 
-    fn write_video_trak(&self, buf: &mut BytesMut, parameters: &h264::Parameters) -> Result<(), Error> {
+    fn write_video_trak(&self, buf: &mut BytesMut, parameters: &VideoParameters) -> Result<(), Error> {
         write_box!(buf, b"trak", {
             write_box!(buf, b"tkhd", {
                 buf.put_u32((1 << 24) | 7); // version, flags
@@ -247,7 +246,7 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
                 for v in &[0x00010000,0,0,0,0x00010000,0,0,0,0x40000000] {
                     buf.put_u32(*v);        // matrix
                 }
-                let dims = self.video_params.as_ref().map(h264::Parameters::pixel_dimensions).unwrap_or((0, 0));
+                let dims = self.video_params.as_ref().map(VideoParameters::pixel_dimensions).unwrap_or((0, 0));
                 let width = u32::from(u16::try_from(dims.0)?) << 16;
                 let height = u32::from(u16::try_from(dims.1)?) << 16;
                 buf.put_u32(width);
@@ -308,7 +307,7 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
         Ok(())
     }
 
-    fn write_audio_trak(&self, buf: &mut BytesMut, parameters: &aac::Parameters) -> Result<(), Error> {
+    fn write_audio_trak(&self, buf: &mut BytesMut, parameters: &AudioParameters) -> Result<(), Error> {
         write_box!(buf, b"trak", {
             write_box!(buf, b"tkhd", {
                 buf.put_u32((1 << 24) | 7); // version, flags
@@ -333,7 +332,7 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
                     buf.put_u32(1 << 24);       // version
                     buf.put_u64(0);             // creation_time
                     buf.put_u64(0);             // modification_time
-                    buf.put_u32(parameters.sampling_frequency());
+                    buf.put_u32(parameters.clock_rate());
                     buf.put_u64(self.audio_trak.tot_duration);
                     buf.put_u32(0x55c40000);    // language=und + pre-defined
                 });
@@ -369,7 +368,7 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
                         write_box!(buf, b"stsd", {
                             buf.put_u32(0); // version
                             buf.put_u32(1); // entry_count
-                            buf.extend_from_slice(parameters.sample_entry());
+                            buf.extend_from_slice(&parameters.sample_entry().unwrap()[..]);
                         });
                         self.audio_trak.write_common_stbl_parts(buf)?;
 
@@ -397,7 +396,8 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
         Ok(())
     }
 
-    fn write_video_sample_entry(&self, buf: &mut BytesMut, parameters: &h264::Parameters) -> Result<(), Error> {
+    fn write_video_sample_entry(&self, buf: &mut BytesMut, parameters: &VideoParameters) -> Result<(), Error> {
+        // TODO: this should move to client::VideoParameters::sample_entry() or some such.
         write_box!(buf, b"avc1", {
             buf.put_u32(0);
             buf.put_u32(1); // data_reference_index = 1
@@ -420,29 +420,28 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
                 0x00, 0x18, 0xff, 0xff, // depth + pre_defined
             ]);
             write_box!(buf, b"avcC", {
-                buf.extend_from_slice(parameters.avc_decoder_config());
+                buf.extend_from_slice(parameters.extra_data());
             });
         });
         Ok(())
     }
 
-    async fn parameters_change(&mut self, parameters: h264::Parameters) -> Result<(), failure::Error> {
-        bail!("parameters change unimplemented. new parameters: {:#?}", parameters)
-    }
-
-    async fn picture(&mut self, mut picture: moonfire_rtsp::client::video::Picture) -> Result<(), failure::Error> {
-        println!("{}: {}-byte picture", &picture.timestamp, picture.remaining());
-        let size = u32::try_from(picture.remaining())?;
-        self.video_trak.add_sample(self.mdat_pos, size, picture.timestamp)?;
+    async fn video(&mut self, mut frame: moonfire_rtsp::codec::VideoFrame) -> Result<(), failure::Error> {
+        println!("{}: {}-byte video frame", &frame.timestamp, frame.remaining());
+        if let Some(ref p) = frame.new_parameters {
+            bail!("parameters change unimplemented. new parameters: {:#?}", p);
+        }
+        let size = u32::try_from(frame.remaining())?;
+        self.video_trak.add_sample(self.mdat_pos, size, frame.timestamp)?;
         self.mdat_pos = self.mdat_pos.checked_add(size).ok_or_else(|| format_err!("mdat_pos overflow"))?;
-        if picture.is_random_access_point {
+        if frame.is_random_access_point {
             self.video_sync_sample_nums.push(u32::try_from(self.video_trak.samples)?);
         }
-        write_all_buf(&mut self.inner, &mut picture).await?;
+        write_all_buf(&mut self.inner, &mut frame).await?;
         Ok(())
     }
 
-    async fn audio_frame(&mut self, mut frame: moonfire_rtsp::client::audio::aac::Frame) -> Result<(), failure::Error> {
+    async fn audio(&mut self, mut frame: moonfire_rtsp::codec::AudioFrame) -> Result<(), failure::Error> {
         println!("{}: {}-byte audio frame", &frame.timestamp, frame.data.remaining());
         let size = u32::try_from(frame.data.remaining())?;
         self.audio_trak.add_sample(self.mdat_pos, size, frame.timestamp)?;
@@ -459,12 +458,12 @@ pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credential
     let video_stream_i = if no_video {
         None
     } else {
-        session.streams().iter().position(|s| s.media == "video" && s.parameters.is_some())
+        session.streams().iter().position(|s| s.media == "video" && s.parameters().is_some())
     };
     let video_parameters = if let Some(i) = video_stream_i {
         session.setup(i).await?;
-        let params = match session.streams()[i].parameters.as_ref() {
-            Some(moonfire_rtsp::client::Parameters::H264(h264)) => h264.clone(),
+        let params = match session.streams()[i].parameters() {
+            Some(moonfire_rtsp::codec::Parameters::Video(v)) => v.clone(),
             _ => panic!(),
         };
         info!("video parameters: {:#?}", &params);
@@ -475,12 +474,12 @@ pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credential
     let audio_stream_i = if no_audio {
         None
     } else {
-        session.streams().iter().position(|s| s.media == "audio" && s.parameters.is_some())
+        session.streams().iter().position(|s| s.media == "audio" && s.parameters().is_some())
     };
     let audio_parameters = if let Some(i) = audio_stream_i {
         session.setup(i).await?;
-        let params = match session.streams()[i].parameters.as_ref() {
-            Some(moonfire_rtsp::client::Parameters::Aac(aac)) => aac.clone(),
+        let params = match session.streams()[i].parameters() {
+            Some(moonfire_rtsp::codec::Parameters::Audio(a)) => a.clone(),
             _ => panic!(),
         };
         info!("audio parameters: {:#?}", &params);
@@ -500,9 +499,8 @@ pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credential
         tokio::select! {
             pkt = session.next() => {
                 match pkt.ok_or_else(|| format_err!("EOF"))?? {
-                    DemuxedItem::Picture(p) => mp4.picture(p).await?,
-                    DemuxedItem::AudioFrame(f) => mp4.audio_frame(f).await?,
-                    DemuxedItem::ParameterChange(p) => mp4.parameters_change(p).await?,
+                    CodecItem::VideoFrame(f) => mp4.video(f).await?,
+                    CodecItem::AudioFrame(f) => mp4.audio(f).await?,
                     _ => continue,
                 };
             },

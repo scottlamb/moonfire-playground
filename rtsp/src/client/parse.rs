@@ -5,8 +5,6 @@ use sdp::media_description::MediaDescription;
 use url::Url;
 use std::{convert::TryFrom, num::NonZeroU16};
 
-use crate::client::Parameters;
-
 use super::{Presentation, Stream};
 
 /// A static payload type in the [RTP parameters
@@ -197,15 +195,6 @@ pub(crate) fn get_cseq(response: &rtsp_types::Response<Bytes>) -> Option<u32> {
             .and_then(|cseq| u32::from_str_radix(cseq.as_str(), 10).ok())
 }
 
-/// Splits the string on the first occurrence of the specified delimiter and
-/// returns prefix before delimiter and suffix after delimiter.
-///
-/// This matches [str::split_once](https://doc.rust-lang.org/std/primitive.str.html#method.split_once)
-/// but doesn't require nightly.
-pub(crate) fn split_once(str: &str, delimiter: char) -> Option<(&str, &str)> {
-    str.find(delimiter).map(|p| (&str[0..p], &str[p+1..]))
-}
-
 /// Parses a [MediaDescription] to a [Stream].
 /// On failure, returns an error which is expected to be supplemented with
 /// the [MediaDescription] debug string.
@@ -260,7 +249,7 @@ fn parse_media(
             // clock-rate = integer
             // encoding-params = channels
             // channels = integer
-            let (rtpmap_payload_type, v) = split_once(&v, ' ')
+            let (rtpmap_payload_type, v) = v.split_once(' ')
                 .ok_or_else(|| format_err!("invalid rtmap attribute"))?;
             if rtpmap_payload_type == rtp_payload_type_str {
                 rtpmap = Some(v);
@@ -268,7 +257,7 @@ fn parse_media(
         } else if a.key == "fmtp" {
             // Similarly starts with payload-type SP.
             let v = a.value.as_ref().ok_or_else(|| format_err!("rtpmap attribute with no value"))?;
-            let (fmtp_payload_type, v) = split_once(&v, ' ')
+            let (fmtp_payload_type, v) = v.split_once(' ')
                 .ok_or_else(|| format_err!("invalid rtmap attribute"))?;
             if fmtp_payload_type == rtp_payload_type_str {
                 fmtp = Some(v);
@@ -284,7 +273,7 @@ fn parse_media(
     let channels;
     match rtpmap {
         Some(rtpmap) => {
-            let (e, rtpmap) = split_once(rtpmap, '/')
+            let (e, rtpmap) = rtpmap.split_once('/')
                 .ok_or_else(|| format_err!("invalid rtpmap attribute"))?;
             encoding_name = e;
             let (clock_rate_str, channels_str) = match rtpmap.find('/') {
@@ -315,47 +304,15 @@ fn parse_media(
         }
     }
 
-    let mut parameters = None;
     let encoding_name = encoding_name.to_ascii_lowercase();
-
-    // https://tools.ietf.org/html/rfc6184#section-8.2.1
-    match media.as_str() {
-        "video" => {
-            if encoding_name == "h264" {
-                if clock_rate != 90000 {
-                    bail!("H.264 streams must have clock rate of 90000");
-                }
-                // This isn't an RFC 6184 requirement, but it makes things
-                // easier, and I haven't yet encountered a camera which doesn't
-                // specify out-of-band parameters.
-                let fmtp = fmtp.ok_or_else(|| format_err!(
-                    "expected out-of-band parameter set for H.264 stream"))?;
-                parameters = Some(Parameters::H264(
-                    crate::client::video::h264::Parameters::from_format_specific_params(fmtp)?));
-            }
-        },
-        "audio" => {
-            if encoding_name == "mpeg4-generic" {
-                let fmtp = fmtp.ok_or_else(|| format_err!(
-                    "expected out-of-band parameter set for AAC stream"))?;
-                parameters = Some(Parameters::Aac(
-                    crate::client::audio::aac::Parameters::from_format_specific_params(fmtp)?));
-            }
-        },
-        "application" => {
-            if let Some(p) = crate::client::application::onvif::Parameters::from(&encoding_name) {
-                parameters = Some(Parameters::Onvif(p));
-            }
-        }
-        _ => {},
-    }
+    let demuxer = crate::codec::Demuxer::new(&media, &encoding_name, clock_rate, channels, fmtp);
 
     Ok(Stream {
         media,
         encoding_name,
         clock_rate,
         rtp_payload_type,
-        parameters,
+        demuxer,
         control,
         alt_control,
         channels,
@@ -519,7 +476,7 @@ pub(crate) fn parse_play(
             super::StreamState::Playing { .. } => unreachable!(),
         };
         for part in parts {
-            let (key, value) = split_once(part, '=')
+            let (key, value) = part.split_once('=')
                 .ok_or_else(|| format_err!("RTP-Info param has no ="))?;
             match key {
                 "seq" => {
@@ -552,8 +509,7 @@ mod tests {
     use failure::Error;
     use url::Url;
 
-    use crate::client::{Parameters, StreamStateInit};
-    use crate::client::video::Parameters as _;
+    use crate::{client::StreamStateInit, codec::Parameters};
 
     use super::super::StreamState;
 
@@ -592,12 +548,12 @@ mod tests {
         assert_eq!(p.streams[0].encoding_name, "h264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
         assert_eq!(p.streams[0].clock_rate, 90_000);
-        match p.streams[0].parameters.as_ref().unwrap() {
-            Parameters::H264(h264) => {
-                assert_eq!(h264.rfc6381_codec(), "avc1.64001E");
-                assert_eq!(h264.pixel_dimensions(), (704, 480));
-                assert_eq!(h264.pixel_aspect_ratio(), None);
-                assert_eq!(h264.frame_rate(), Some((2, 30)));
+        match p.streams[0].parameters().unwrap() {
+            Parameters::Video(v) => {
+                assert_eq!(v.rfc6381_codec(), "avc1.64001E");
+                assert_eq!(v.pixel_dimensions(), (704, 480));
+                assert_eq!(v.pixel_aspect_ratio(), None);
+                assert_eq!(v.frame_rate(), Some((2, 30)));
             },
             _ => panic!(),
         }
@@ -608,8 +564,8 @@ mod tests {
         assert_eq!(p.streams[1].encoding_name, "mpeg4-generic");
         assert_eq!(p.streams[1].rtp_payload_type, 97);
         assert_eq!(p.streams[1].clock_rate, 48_000);
-        match p.streams[1].parameters {
-            Some(Parameters::Aac(_)) => {},
+        match p.streams[1].parameters() {
+            Some(Parameters::Audio(_)) => {},
             _ => panic!(),
         }
 
@@ -619,7 +575,7 @@ mod tests {
         assert_eq!(p.streams[2].encoding_name, "vnd.onvif.metadata");
         assert_eq!(p.streams[2].rtp_payload_type, 107);
         assert_eq!(p.streams[2].clock_rate, 90_000);
-        assert!(matches!(p.streams[2].parameters, Some(crate::client::Parameters::Onvif(_))));
+        assert!(matches!(p.streams[2].parameters(), Some(Parameters::Message(_))));
 
         // SETUP.
         let setup_response = response(include_bytes!("testdata/dahua_setup.txt"));
@@ -659,11 +615,11 @@ mod tests {
         assert_eq!(p.streams[0].media, "video");
         assert_eq!(p.streams[0].encoding_name, "h265");
         assert_eq!(p.streams[0].rtp_payload_type, 98);
-        assert!(p.streams[1].parameters.is_none());
+        assert!(p.streams[1].parameters().is_none());
         assert_eq!(p.streams[1].media, "audio");
         assert_eq!(p.streams[1].encoding_name, "pcma");
         assert_eq!(p.streams[1].rtp_payload_type, 8);
-        assert!(p.streams[1].parameters.is_none());
+        assert!(p.streams[1].parameters().is_none());
     }
 
     #[test]
@@ -687,12 +643,12 @@ mod tests {
         assert_eq!(p.streams[0].encoding_name, "h264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
         assert_eq!(p.streams[0].clock_rate, 90_000);
-        match p.streams[0].parameters.as_ref().unwrap() {
-            Parameters::H264(h264) => {
-                assert_eq!(h264.rfc6381_codec(), "avc1.4D0029");
-                assert_eq!(h264.pixel_dimensions(), (1920, 1080));
-                assert_eq!(h264.pixel_aspect_ratio(), None);
-                assert_eq!(h264.frame_rate(), Some((2_000, 60_000)));
+        match p.streams[0].parameters().unwrap() {
+            Parameters::Video(v) => {
+                assert_eq!(v.rfc6381_codec(), "avc1.4D0029");
+                assert_eq!(v.pixel_dimensions(), (1920, 1080));
+                assert_eq!(v.pixel_aspect_ratio(), None);
+                assert_eq!(v.frame_rate(), Some((2_000, 60_000)));
             },
             _ => panic!(),
         }
@@ -704,7 +660,7 @@ mod tests {
         assert_eq!(p.streams[1].encoding_name, "vnd.onvif.metadata");
         assert_eq!(p.streams[1].rtp_payload_type, 107);
         assert_eq!(p.streams[1].clock_rate, 90_000);
-        assert!(matches!(p.streams[1].parameters, Some(crate::client::Parameters::Onvif(_))));
+        assert!(matches!(p.streams[1].parameters(), Some(Parameters::Message(_))));
 
         // SETUP.
         let setup_response = response(include_bytes!("testdata/hikvision_setup.txt"));
@@ -751,12 +707,12 @@ mod tests {
         assert_eq!(p.streams[0].encoding_name, "h264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
         assert_eq!(p.streams[0].clock_rate, 90_000);
-        match p.streams[0].parameters.as_ref().unwrap() {
-            Parameters::H264(h264) => {
-                assert_eq!(h264.rfc6381_codec(), "avc1.640033");
-                assert_eq!(h264.pixel_dimensions(), (2560, 1440));
-                assert_eq!(h264.pixel_aspect_ratio(), None);
-                assert_eq!(h264.frame_rate(), None);
+        match p.streams[0].parameters().unwrap() {
+            Parameters::Video(v) => {
+                assert_eq!(v.rfc6381_codec(), "avc1.640033");
+                assert_eq!(v.pixel_dimensions(), (2560, 1440));
+                assert_eq!(v.pixel_aspect_ratio(), None);
+                assert_eq!(v.frame_rate(), None);
             },
             _ => panic!(),
         };
@@ -767,8 +723,8 @@ mod tests {
         assert_eq!(p.streams[1].encoding_name, "mpeg4-generic");
         assert_eq!(p.streams[1].rtp_payload_type, 97);
         assert_eq!(p.streams[1].clock_rate, 16_000);
-        match p.streams[1].parameters {
-            Some(Parameters::Aac(_)) => {},
+        match p.streams[1].parameters() {
+            Some(Parameters::Audio(_)) => {},
             _ => panic!(),
         }
 
@@ -822,8 +778,8 @@ mod tests {
         assert_eq!(p.streams[0].rtp_payload_type, 96);
         assert_eq!(p.streams[0].clock_rate, 12_000);
         assert_eq!(p.streams[0].channels, NonZeroU16::new(2));
-        match p.streams[0].parameters {
-            Some(Parameters::Aac(_)) => {},
+        match p.streams[0].parameters() {
+            Some(Parameters::Audio(_)) => {},
             _ => panic!(),
         }
 
@@ -833,12 +789,12 @@ mod tests {
         assert_eq!(p.streams[1].encoding_name, "h264");
         assert_eq!(p.streams[1].rtp_payload_type, 97);
         assert_eq!(p.streams[1].clock_rate, 90_000);
-        match p.streams[1].parameters.as_ref().unwrap() {
-            Parameters::H264(h264) => {
-                assert_eq!(h264.rfc6381_codec(), "avc1.42C01E");
-                assert_eq!(h264.pixel_dimensions(), (240, 160));
-                assert_eq!(h264.pixel_aspect_ratio(), None);
-                assert_eq!(h264.frame_rate(), Some((2, 48)));
+        match p.streams[1].parameters().unwrap() {
+            Parameters::Video(v) => {
+                assert_eq!(v.rfc6381_codec(), "avc1.42C01E");
+                assert_eq!(v.pixel_dimensions(), (240, 160));
+                assert_eq!(v.pixel_aspect_ratio(), None);
+                assert_eq!(v.frame_rate(), Some((2, 48)));
             },
             _ => panic!(),
         }
@@ -883,12 +839,12 @@ mod tests {
         assert_eq!(p.streams[0].encoding_name, "h264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
         assert_eq!(p.streams[0].clock_rate, 90_000);
-        match p.streams[0].parameters.as_ref().unwrap() {
-            Parameters::H264(h264) => {
-                assert_eq!(h264.rfc6381_codec(), "avc1.4D001F");
-                assert_eq!(h264.pixel_dimensions(), (1280, 720));
-                assert_eq!(h264.pixel_aspect_ratio(), None);
-                assert_eq!(h264.frame_rate(), None);
+        match p.streams[0].parameters().unwrap() {
+            Parameters::Video(v) => {
+                assert_eq!(v.rfc6381_codec(), "avc1.4D001F");
+                assert_eq!(v.pixel_dimensions(), (1280, 720));
+                assert_eq!(v.pixel_aspect_ratio(), None);
+                assert_eq!(v.frame_rate(), None);
             },
             _ => panic!(),
         }
@@ -900,7 +856,7 @@ mod tests {
         assert_eq!(p.streams[1].rtp_payload_type, 0);
         assert_eq!(p.streams[1].clock_rate, 8_000);
         assert_eq!(p.streams[1].channels, NonZeroU16::new(1));
-        assert!(p.streams[1].parameters.is_none());
+        assert!(p.streams[1].parameters().is_none());
     }
 
     /// [GW Security GW4089IP](https://github.com/scottlamb/moonfire-nvr/wiki/Cameras:-GW-Security#gw4089ip),
@@ -921,12 +877,12 @@ mod tests {
         assert_eq!(p.streams[0].encoding_name, "h264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
         assert_eq!(p.streams[0].clock_rate, 90_000);
-        match p.streams[0].parameters.as_ref().unwrap() {
-            Parameters::H264(h264) => {
-                assert_eq!(h264.rfc6381_codec(), "avc1.4D002A");
-                assert_eq!(h264.pixel_dimensions(), (1920, 1080));
-                assert_eq!(h264.pixel_aspect_ratio(), None);
-                assert_eq!(h264.frame_rate(), None);
+        match p.streams[0].parameters().unwrap() {
+            Parameters::Video(v) => {
+                assert_eq!(v.rfc6381_codec(), "avc1.4D002A");
+                assert_eq!(v.pixel_dimensions(), (1920, 1080));
+                assert_eq!(v.pixel_aspect_ratio(), None);
+                assert_eq!(v.frame_rate(), None);
             },
             _ => panic!(),
         }
@@ -938,7 +894,7 @@ mod tests {
         assert_eq!(p.streams[1].rtp_payload_type, 8);
         assert_eq!(p.streams[1].clock_rate, 8_000);
         assert_eq!(p.streams[1].channels, NonZeroU16::new(1));
-        assert!(p.streams[1].parameters.is_none());
+        assert!(p.streams[1].parameters().is_none());
 
         // SETUP.
         let setup_response = response(include_bytes!("testdata/gw_main_setup_video.txt"));
@@ -1002,12 +958,12 @@ mod tests {
         assert_eq!(p.streams[0].encoding_name, "h264");
         assert_eq!(p.streams[0].rtp_payload_type, 96);
         assert_eq!(p.streams[0].clock_rate, 90_000);
-        match p.streams[0].parameters.as_ref().unwrap() {
-            Parameters::H264(h264) => {
-                assert_eq!(h264.rfc6381_codec(), "avc1.4D001E");
-                assert_eq!(h264.pixel_dimensions(), (720, 480));
-                assert_eq!(h264.pixel_aspect_ratio(), None);
-                assert_eq!(h264.frame_rate(), None);
+        match p.streams[0].parameters().unwrap() {
+            Parameters::Video(v) => {
+                assert_eq!(v.rfc6381_codec(), "avc1.4D001E");
+                assert_eq!(v.pixel_dimensions(), (720, 480));
+                assert_eq!(v.pixel_aspect_ratio(), None);
+                assert_eq!(v.frame_rate(), None);
             },
             _ => panic!(),
         }

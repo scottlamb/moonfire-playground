@@ -13,18 +13,19 @@
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use failure::{Error, bail, format_err};
-use pretty_hex::PrettyHex;
-use std::{convert::TryFrom, fmt::Debug};
+use std::{convert::TryFrom, fmt::Debug, num::{NonZeroU16, NonZeroU32}};
 
-use crate::client::{DemuxedItem, rtp::Packet};
+use crate::client::rtp::Packet;
+
+use super::CodecItem;
 
 /// An AudioSpecificConfig as in ISO/IEC 14496-3 section 1.6.2.1.
 /// Currently just a few fields of interest.
 #[derive(Clone, Debug)]
-struct AudioSpecificConfig {
+pub(super) struct AudioSpecificConfig {
     /// See ISO/IEC 14496-3 Table 1.3.
     audio_object_type: u8,
-    frame_length: u32,
+    frame_length: NonZeroU32,
     sampling_frequency: u32,
     channels: &'static ChannelConfig,
 }
@@ -107,12 +108,12 @@ impl AudioSpecificConfig {
 
         // GASpecificConfig, ISO/IEC 14496-3 section 4.4.1.
         let frame_length = match (audio_object_type, r.read_bool()?) {
-            (3 /* AAC SR */, false) => 256,
+            (3 /* AAC SR */, false) => NonZeroU32::new(256).expect("non-zero"),
             (3 /* AAC SR */, true) => bail!("frame_length_flag must be false for AAC SSR"),
-            (23 /* ER AAC LD */, false) => 512,
-            (23 /* ER AAC LD */, true) => 480,
-            (_, false) => 1024,
-            (_, true) => 960,
+            (23 /* ER AAC LD */, false) => NonZeroU32::new(512).expect("non-zero"),
+            (23 /* ER AAC LD */, true) => NonZeroU32::new(480).expect("non-zero"),
+            (_, false) => NonZeroU32::new(1024).expect("non-zero"),
+            (_, true) => NonZeroU32::new(960).expect("non-zero"),
         };
 
         Ok(AudioSpecificConfig {
@@ -199,7 +200,9 @@ macro_rules! write_descriptor {
 
 /// Returns an MP4AudioSampleEntry (`mp4a`) box as in ISO/IEC 14496-14 section 5.6.1.
 /// `config` should be a raw AudioSpecificConfig (matching `parsed`).
-fn get_mp4a_box(parsed: &AudioSpecificConfig, config: &[u8]) -> Result<Bytes, Error> {
+pub(super) fn get_mp4a_box(parameters: &super::AudioParameters) -> Result<Bytes, Error> {
+    let parsed = &parameters.config;
+    let config = &parameters.extra_data[..];
     let mut buf = BytesMut::new();
 
     // Write an MP4AudioSampleEntry (`mp4a`), as in ISO/IEC 14496-14 section 5.6.1.
@@ -253,9 +256,7 @@ fn get_mp4a_box(parsed: &AudioSpecificConfig, config: &[u8]) -> Result<Bytes, Er
                     // 8.2.2.1 defines the total decoder input buffer size as
                     // 6144 bits per NCC.
                     let buffer_size_bytes = (6144 / 8) * u32::from(parsed.channels.ncc);
-                    if buffer_size_bytes > 0xFF_FFFF {
-                        bail!("unreasonable buffer_size_bytes={}", buffer_size_bytes);
-                    }
+                    debug_assert!(buffer_size_bytes <= 0xFF_FFFF);
 
                     // buffer_size_bytes as a 24-bit number
                     buf.put_u8((buffer_size_bytes >> 16) as u8);
@@ -285,115 +286,87 @@ fn get_mp4a_box(parsed: &AudioSpecificConfig, config: &[u8]) -> Result<Bytes, Er
     Ok(buf.freeze())
 }
 
-#[derive(Clone)]
-pub struct Parameters {
-    config: AudioSpecificConfig,
-    rfc6381_codec: String,
-    sample_entry: Bytes,
-}
-
-impl Parameters {
-    /// Parses metadata from the `format-specific-params` of a SDP `fmtp` media attribute.
-    /// The metadata is defined in [RFC 3640 section
-    /// 4.1](https://datatracker.ietf.org/doc/html/rfc3640#section-4.1).
-    pub fn from_format_specific_params(format_specific_params: &str) -> Result<Self, Error> {
-        let mut mode = None;
-        let mut config = None;
-        let mut size_length = None;
-        let mut index_length = None;
-        let mut index_delta_length = None;
-        for p in format_specific_params.split(';') {
-            let p = p.trim();
-            if p == "" {
-                // Reolink cameras leave a trailing ';'.
-                continue;
-            }
-            let (key, value) = crate::client::parse::split_once(p, '=')
-                .ok_or_else(|| format_err!("bad format-specific-param {}", p))?;
-            match &key.to_ascii_lowercase()[..] {
-                "config" => {
-                    config = Some(hex::decode(value)
-                        .map_err(|_| format_err!("config has invalid hex encoding"))?);
-                },
-                "mode" => mode = Some(value),
-                "sizelength" => {
-                    size_length = Some(u16::from_str_radix(value, 10)
-                        .map_err(|_| format_err!("bad sizeLength"))?);
-                },
-                "indexlength" => {
-                    index_length = Some(u16::from_str_radix(value, 10)
-                        .map_err(|_| format_err!("bad indexLength"))?);
-                },
-                "indexdeltalength" => {
-                    index_delta_length = Some(u16::from_str_radix(value, 10)
-                        .map_err(|_| format_err!("bad indexDeltaLength"))?);
-                },
-                _ => {},
-            }
+/// Parses metadata from the `format-specific-params` of a SDP `fmtp` media attribute.
+/// The metadata is defined in [RFC 3640 section
+/// 4.1](https://datatracker.ietf.org/doc/html/rfc3640#section-4.1).
+fn parse_format_specific_params(
+    clock_rate: u32,
+    format_specific_params: &str,
+) -> Result<super::AudioParameters, Error> {
+    let mut mode = None;
+    let mut config = None;
+    let mut size_length = None;
+    let mut index_length = None;
+    let mut index_delta_length = None;
+    for p in format_specific_params.split(';') {
+        let p = p.trim();
+        if p == "" {
+            // Reolink cameras leave a trailing ';'.
+            continue;
         }
-        // https://datatracker.ietf.org/doc/html/rfc3640#section-3.3.6 AAC-hbr
-        if mode != Some("AAC-hbr") {
-            bail!("Expected mode AAC-hbr, got {:#?}", mode);
+        let (key, value) = p.split_once('=')
+            .ok_or_else(|| format_err!("bad format-specific-param {}", p))?;
+        match &key.to_ascii_lowercase()[..] {
+            "config" => {
+                config = Some(hex::decode(value)
+                    .map_err(|_| format_err!("config has invalid hex encoding"))?);
+            },
+            "mode" => mode = Some(value),
+            "sizelength" => {
+                size_length = Some(u16::from_str_radix(value, 10)
+                    .map_err(|_| format_err!("bad sizeLength"))?);
+            },
+            "indexlength" => {
+                index_length = Some(u16::from_str_radix(value, 10)
+                    .map_err(|_| format_err!("bad indexLength"))?);
+            },
+            "indexdeltalength" => {
+                index_delta_length = Some(u16::from_str_radix(value, 10)
+                    .map_err(|_| format_err!("bad indexDeltaLength"))?);
+            },
+            _ => {},
         }
-        let config = config.ok_or_else(|| format_err!("config must be specified"))?;
-        if size_length != Some(13) || index_length != Some(3) || index_delta_length != Some(3) {
-            bail!("Unexpected sizeLength={:?} indexLength={:?} indexDeltaLength={:?}",
-                  size_length, index_length, index_delta_length);
-        }
-
-        let parsed = AudioSpecificConfig::parse(&config[..])?;
-        let sample_entry = get_mp4a_box(&parsed, &config[..])?;
-
-        // https://datatracker.ietf.org/doc/html/rfc6381#section-3.3
-        let rfc6381_codec = format!("mp4a.40.{}", parsed.audio_object_type);
-        Ok(Parameters {
-            config: parsed,
-            rfc6381_codec,
-            sample_entry,
-        })
+    }
+    // https://datatracker.ietf.org/doc/html/rfc3640#section-3.3.6 AAC-hbr
+    if mode != Some("AAC-hbr") {
+        bail!("Expected mode AAC-hbr, got {:#?}", mode);
+    }
+    let config = config.ok_or_else(|| format_err!("config must be specified"))?;
+    if size_length != Some(13) || index_length != Some(3) || index_delta_length != Some(3) {
+        bail!("Unexpected sizeLength={:?} indexLength={:?} indexDeltaLength={:?}",
+                size_length, index_length, index_delta_length);
     }
 
-    pub fn sampling_frequency(&self) -> u32 {
-        self.config.sampling_frequency
+    let parsed = AudioSpecificConfig::parse(&config[..])?;
+
+    // TODO: is this a requirement? I might have read somewhere one can be a multiple of the other.
+    if clock_rate != parsed.sampling_frequency {
+        bail!("Expected RTP clock rate {} and AAC sampling frequency {} to match",
+                clock_rate, parsed.sampling_frequency);
     }
 
-    pub fn sample_entry(&self) -> &[u8] {
-        &self.sample_entry
-    }
+    // https://datatracker.ietf.org/doc/html/rfc6381#section-3.3
+    let rfc6381_codec = format!("mp4a.40.{}", parsed.audio_object_type);
+    let frame_length = Some(parsed.frame_length);
+    Ok(super::AudioParameters {
+        config: parsed,
+        clock_rate,
+        rfc6381_codec,
+        frame_length,
+        extra_data: Bytes::from(config),
+    })
 }
 
-impl std::fmt::Debug for Parameters {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("aac::Parameters")
-         .field("config", &self.config)
-         .field("rfc6381_codec", &self.rfc6381_codec)
-         .field("sample_entry", &self.sample_entry.hex_dump())
-         .finish()
-    }
-}
-
-pub struct Frame {
-    pub ctx: crate::Context,
-    pub stream_id: usize,
-    pub timestamp: crate::Timestamp,
-    pub data: Bytes,
-}
-
-impl Debug for Frame {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("aac::Frame")
-         .field("stream_id", &self.stream_id)
-         .field("timestamp", &self.timestamp)
-         .field("data", &self.data.hex_dump())
-         .finish()
-    }
-}
-
+#[derive(Debug)]
 pub(crate) struct Demuxer {
-    params: Parameters,
+    parameters: super::Parameters,
+
+    /// This is in parameters but duplicated here to avoid destructuring.
+    frame_length: NonZeroU32,
     state: DemuxerState,
 }
 
+#[derive(Debug)]
 struct Aggregate {
     ctx: crate::Context,
 
@@ -420,30 +393,47 @@ struct Aggregate {
     mark: bool,
 }
 
+#[derive(Debug)]
 struct Fragment {
     rtp_timestamp: u16,
     size: u16,
     buf: BytesMut,
 }
 
+#[derive(Debug)]
 enum DemuxerState {
     Idle,
     Aggregated(Aggregate),
     Fragmented(Fragment),
-    Ready(Frame),
+    Ready(super::AudioFrame),
 }
 
 impl Demuxer {
-    pub(crate) fn new(params: Parameters) -> Box<dyn crate::client::Demuxer> {
-        Box::new(Self {
-            params,
+    pub(super) fn new(
+        clock_rate: u32,
+        channels: Option<NonZeroU16>,
+        format_specific_params: Option<&str>
+    ) -> Result<Self, Error> {
+        let format_specific_params = format_specific_params
+            .ok_or_else(|| format_err!("AAC requires format specific params"))?;
+        let parameters = parse_format_specific_params(clock_rate, format_specific_params)?;
+        if matches!(channels, Some(c) if c.get() != parameters.config.channels.channels) {
+            bail!("Expected RTP channels {:?} and AAC channels {:?} to match",
+                  channels, parameters.config.channels);
+        }
+        let frame_length = parameters.config.frame_length;
+        Ok(Self {
+            parameters: super::Parameters::Audio(parameters),
+            frame_length,
             state: DemuxerState::Idle,
         })
     }
-}
 
-impl crate::client::Demuxer for Demuxer {
-    fn push(&mut self, mut pkt: Packet) -> Result<(), Error> {
+    pub(super) fn parameters(&self) -> Option<&super::Parameters> {
+        Some(&self.parameters)
+    }
+
+    pub(super) fn push(&mut self, mut pkt: Packet) -> Result<(), Error> {
         // Read the AU headers.
         if pkt.payload.len() < 2 {
             bail!("packet too short for au-header-length");
@@ -486,8 +476,9 @@ impl crate::client::Demuxer for Demuxer {
                         }
                         frag.buf.extend_from_slice(data);
                         println!("au {}: len-{}, fragmented", &pkt.timestamp, size);
-                        self.state = DemuxerState::Ready(Frame {
+                        self.state = DemuxerState::Ready(super::AudioFrame {
                             ctx: pkt.rtsp_ctx,
+                            frame_length: self.frame_length,
                             stream_id: pkt.stream_id,
                             timestamp: pkt.timestamp,
                             data: std::mem::take(&mut frag.buf).freeze(),
@@ -517,7 +508,7 @@ impl crate::client::Demuxer for Demuxer {
         Ok(())
     }
 
-    fn pull(&mut self) -> Result<Option<crate::client::DemuxedItem>, Error> {
+    pub(super) fn pull(&mut self) -> Result<Option<super::CodecItem>, Error> {
         match std::mem::replace(&mut self.state, DemuxerState::Idle) {
             s @ DemuxerState::Idle | s @ DemuxerState::Fragmented(..) => {
                 self.state = s;
@@ -525,7 +516,7 @@ impl crate::client::Demuxer for Demuxer {
             },
             DemuxerState::Ready(f) => {
                 self.state = DemuxerState::Idle;
-                Ok(Some(DemuxedItem::AudioFrame(f)))
+                Ok(Some(CodecItem::AudioFrame(f)))
             }
             DemuxerState::Aggregated(mut agg) => {
                 let i = usize::from(agg.frame_i);
@@ -558,10 +549,11 @@ impl crate::client::Demuxer for Demuxer {
                 if !agg.mark {
                     bail!("mark must be set on non-fragmented au");
                 }
-                let frame = Frame {
+                let frame = super::AudioFrame {
                     ctx: agg.ctx,
                     stream_id: agg.stream_id,
-                    timestamp: agg.timestamp.try_add(u64::from(agg.frame_i) * u64::from(self.params.config.frame_length))?,
+                    frame_length: self.frame_length,
+                    timestamp: agg.timestamp.try_add(u64::from(agg.frame_i) * u64::from(self.frame_length.get()))?,
                     data: agg.buf.slice(agg.data_off..agg.data_off+size),
                 };
                 agg.data_off += size;
@@ -569,7 +561,7 @@ impl crate::client::Demuxer for Demuxer {
                 if agg.frame_i < agg.frame_count {
                     self.state = DemuxerState::Aggregated(agg);
                 }
-                Ok(Some(DemuxedItem::AudioFrame(frame)))
+                Ok(Some(CodecItem::AudioFrame(frame)))
             },
         }
     }

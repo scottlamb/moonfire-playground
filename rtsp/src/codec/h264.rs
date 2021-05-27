@@ -7,9 +7,9 @@ use failure::{Error, bail, format_err};
 use h264_reader::nal::UnitType;
 use log::debug;
 
-use crate::client::{self, rtp::Packet, video::Picture};
+use crate::client::rtp::Packet;
 
-/// A [super::rtp::PacketDemuxer] implementation which finds access unit boundaries
+/// A [super::Demuxer] implementation which finds access unit boundaries
 /// and produces unfragmented NAL units as specified in [RFC
 /// 6184](https://tools.ietf.org/html/rfc6184).
 ///
@@ -18,10 +18,11 @@ use crate::client::{self, rtp::Packet, video::Picture};
 /// pictures and association to access units".
 /// 
 /// Currently expects that the stream starts at an access unit boundary and has no lost packets.
-pub struct Demuxer {
+#[derive(Debug)]
+pub(crate) struct Demuxer {
     input_state: DemuxerInputState,
     pending: Option<AccessUnit>,
-    parameters: Parameters,
+    parameters: InternalParameters,
 
     /// The largest fragment used. This is used for the buffer capacity on subsequent fragments, minimizing reallocation.
     frag_high_water: usize,
@@ -40,6 +41,7 @@ struct AccessUnit {
     picture: Option<Bytes>,
 }
 
+#[derive(Debug)]
 struct PreMark {
     /// If a FU-A fragment is in progress, the buffer used to accumulate the NAL.
     frag_buf: Option<BytesMut>,
@@ -47,6 +49,7 @@ struct PreMark {
     access_unit: AccessUnit,
 }
 
+#[derive(Debug)]
 enum DemuxerInputState {
     /// Not yet processing an access unit.
     New,
@@ -60,18 +63,27 @@ enum DemuxerInputState {
 }
 
 impl Demuxer {
-    pub(crate) fn new(parameters: Parameters) -> Box<dyn client::Demuxer> {
-        Box::new(Demuxer {
+    pub(super) fn new(clock_rate: u32, format_specific_params: Option<&str>) -> Result<Self, Error> {
+        if clock_rate != 90_000 {
+            bail!("H.264 clock rate must always be 90000");
+        }
+
+        // TODO: the spec doesn't require out-of-band parameters, so we shouldn't either.
+        let format_specific_params = format_specific_params
+            .ok_or_else(|| format_err!("H.264 demuxer expects out-of-band parameters"))?;
+        Ok(Demuxer {
             input_state: DemuxerInputState::New,
             pending: None,
             frag_high_water: 0,
-            parameters,
+            parameters: InternalParameters::parse_format_specific_params(format_specific_params)?,
         })
     }
-}
 
-impl client::Demuxer for Demuxer {
-    fn push(&mut self, pkt: Packet) -> Result<(), Error> {
+    pub(super) fn parameters(&self) -> Option<&super::Parameters> {
+        Some(&self.parameters.generic_parameters)
+    }
+
+    pub(super) fn push(&mut self, pkt: Packet) -> Result<(), Error> {
         // Push shouldn't be called until pull is exhausted.
         if let Some(p) = self.pending.as_ref() {
             panic!("push with data already pending: {:?}", p);
@@ -198,24 +210,27 @@ impl client::Demuxer for Demuxer {
         Ok(())
     }
 
-    fn pull(&mut self) -> Result<Option<client::DemuxedItem>, Error> {
-        let mut pending = match self.pending.take() {
+    pub(super) fn pull(&mut self) -> Result<Option<super::CodecItem>, Error> {
+        let pending = match self.pending.take() {
             None => return Ok(None),
             Some(p) => p,
         };
-        if pending.new_sps.is_some() || pending.new_pps.is_some() {
-            let sps_nal = pending.new_sps.as_deref().unwrap_or(self.parameters.sps_nal());
-            let pps_nal = pending.new_pps.as_deref().unwrap_or(self.parameters.pps_nal());
-            let new_parameters = Parameters::from_sps_and_pps(sps_nal, pps_nal)?;
-            pending.new_sps = None;
-            pending.new_pps = None;
-            self.pending = Some(pending);
-            self.parameters = new_parameters.clone();
-            return Ok(Some(client::DemuxedItem::ParameterChange(new_parameters)));
-        }
+        let new_parameters = if pending.new_sps.is_some() || pending.new_pps.is_some() {
+            let sps_nal = pending.new_sps.as_deref().unwrap_or(&self.parameters.sps_nal);
+            let pps_nal = pending.new_pps.as_deref().unwrap_or(&self.parameters.pps_nal);
+            self.parameters = InternalParameters::parse_sps_and_pps(sps_nal, pps_nal)?;
+            match self.parameters.generic_parameters {
+                super::Parameters::Video(ref p) => Some(p.clone()),
+                _ => unreachable!(),
+            }
+        } else {
+            None
+        };
         let picture = pending.picture.ok_or_else(|| format_err!("access unit has no picture"))?;
         let nal_header = h264_reader::nal::NalHeader::new(picture[0]).expect("nal header was previously valid");
-        Ok(Some(client::DemuxedItem::Picture(Picture {
+        Ok(Some(super::CodecItem::VideoFrame(super::VideoFrame {
+            ctx: pending.ctx,
+            new_parameters,
             timestamp: pending.timestamp,
             stream_id: pending.stream_id,
             is_random_access_point: nal_header.nal_unit_type() == UnitType::SliceLayerWithoutPartitioningIdr,
@@ -239,7 +254,7 @@ impl AccessUnit {
         }
     }
 
-    fn nal(&mut self, parameters: &mut Parameters, nal: Bytes) -> Result<(), Error> {
+    fn nal(&mut self, parameters: &mut InternalParameters, nal: Bytes) -> Result<(), Error> {
         let nal_header = h264_reader::nal::NalHeader::new(nal[0]).map_err(|e| format_err!("bad NAL header 0x{:x}: {:#?}", nal[0], e))?;
         let unit_type = nal_header.nal_unit_type();
         match unit_type {
@@ -247,7 +262,7 @@ impl AccessUnit {
                 if self.new_sps.is_some() {
                     bail!("multiple SPSs in access unit");
                 }
-                if nal != parameters.sps_nal() {
+                if nal != parameters.sps_nal {
                     self.new_sps = Some(nal);
                 }
             },
@@ -255,7 +270,7 @@ impl AccessUnit {
                 if self.new_pps.is_some() {
                     bail!("multiple PPSs in access unit");
                 }
-                if nal != parameters.pps_nal() {
+                if nal != parameters.pps_nal {
                     self.new_pps = Some(nal);
                 }
             },
@@ -295,40 +310,24 @@ fn decode(encoded: &[u8]) -> Vec<u8> {
     read.0
 }
 
-#[derive(Clone)]
-pub struct Parameters {
-    pixel_dimensions: (u32, u32),
-    rfc6381_codec: String,
-    pixel_aspect_ratio: Option<(u32, u32)>,
-    frame_rate: Option<(u32, u32)>,
-    avc_decoder_config: Vec<u8>,
 
-    /// The SPS NAL, as a range within [avc_decoder_config].
-    sps_nal: std::ops::Range<usize>,
+#[derive(Clone, Debug)]
+struct InternalParameters {
+    generic_parameters: super::Parameters,
 
-    /// The PPS NAL, as a range within [avc_decoder_config].
-    pps_nal: std::ops::Range<usize>,
+    /// The (single) SPS NAL.
+    sps_nal: Bytes,
+
+    /// The (single) PPS NAL.
+    pps_nal: Bytes,
 }
 
-impl std::fmt::Debug for Parameters {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use pretty_hex::PrettyHex;
-        f.debug_struct("h264::Parameters")
-         .field("rfc6381_codec", &self.rfc6381_codec)
-         .field("pixel_dimensions", &self.pixel_dimensions)
-         .field("pixel_aspect_ratio", &self.pixel_aspect_ratio)
-         .field("frame_rate", &self.frame_rate)
-         .field("avc_decoder_config", &self.avc_decoder_config.hex_dump())
-         .finish()
-    }
-}
-
-impl Parameters {
+impl InternalParameters {
     /// Parses metadata from the `format-specific-params` of a SDP `fmtp` media attribute.
-    pub fn from_format_specific_params(format_specific_params: &str) -> Result<Self, Error> {
+    fn parse_format_specific_params(format_specific_params: &str) -> Result<Self, Error> {
         let mut sprop_parameter_sets = None;
         for p in format_specific_params.split(';') {
-            let (key, value) = client::parse::split_once(p.trim(), '=').unwrap();
+            let (key, value) = p.trim().split_once('=').unwrap();
             if key == "sprop-parameter-sets" {
                 sprop_parameter_sets = Some(value);
             }
@@ -369,10 +368,10 @@ impl Parameters {
         // the first frame is received. Strip them out.
         let sps_nal = sps_nal.strip_suffix(b"\x00\x00\x00\x01").unwrap_or(&sps_nal);
         let pps_nal = pps_nal.strip_suffix(b"\x00\x00\x00\x01").unwrap_or(&pps_nal);
-        Self::from_sps_and_pps(&sps_nal[..], &pps_nal[..])
+        Self::parse_sps_and_pps(&sps_nal[..], &pps_nal[..])
     }
 
-    fn from_sps_and_pps(sps_nal: &[u8], pps_nal: &[u8]) -> Result<Self, Error> {
+    fn parse_sps_and_pps(sps_nal: &[u8], pps_nal: &[u8]) -> Result<InternalParameters, Error> {
         let sps_rbsp = decode(&sps_nal[1..]);
         if sps_rbsp.len() < 4 {
             bail!("bad sps");
@@ -387,25 +386,25 @@ impl Parameters {
         // Create the AVCDecoderConfiguration, ISO/IEC 14496-15 section 5.2.4.1.
         // The beginning of the AVCDecoderConfiguration takes a few values from
         // the SPS (ISO/IEC 14496-10 section 7.3.2.1.1).
-        let mut avc_decoder_config = Vec::with_capacity(11 + sps_nal.len() + pps_nal.len());
-        avc_decoder_config.push(1); // configurationVersion
+        let mut avc_decoder_config = BytesMut::with_capacity(11 + sps_nal.len() + pps_nal.len());
+        avc_decoder_config.put_u8(1); // configurationVersion
         avc_decoder_config.extend(&sps_rbsp[0..=2]); // profile_idc . AVCProfileIndication
-                                                     // ...misc bits... . profile_compatibility
-                                                     // level_idc . AVCLevelIndication
+                                                        // ...misc bits... . profile_compatibility
+                                                        // level_idc . AVCLevelIndication
 
         // Hardcode lengthSizeMinusOne to 3, matching TransformSampleData's 4-byte
         // lengths.
-        avc_decoder_config.push(0xff);
+        avc_decoder_config.put_u8(0xff);
 
         // Only support one SPS and PPS.
         // ffmpeg's ff_isom_write_avcc has the same limitation, so it's probably
         // fine. This next byte is a reserved 0b111 + a 5-bit # of SPSs (1).
-        avc_decoder_config.push(0xe1);
+        avc_decoder_config.put_u8(0xe1);
         avc_decoder_config.extend(&u16::try_from(sps_nal.len())?.to_be_bytes()[..]);
         let sps_nal_start = avc_decoder_config.len();
         avc_decoder_config.extend_from_slice(&sps_nal[..]);
         let sps_nal_end = avc_decoder_config.len();
-        avc_decoder_config.push(1); // # of PPSs.
+        avc_decoder_config.put_u8(1); // # of PPSs.
         avc_decoder_config.extend(&u16::try_from(pps_nal.len())?.to_be_bytes()[..]);
         let pps_nal_start = avc_decoder_config.len();
         avc_decoder_config.extend_from_slice(&pps_nal[..]);
@@ -425,45 +424,20 @@ impl Parameters {
                 frame_rate = None;
             },
         }
-        Ok(Parameters {
-            avc_decoder_config,
-            pixel_dimensions,
-            rfc6381_codec,
-            pixel_aspect_ratio,
-            frame_rate,
-            sps_nal: sps_nal_start..sps_nal_end,
-            pps_nal: pps_nal_start..pps_nal_end,
+        let avc_decoder_config = avc_decoder_config.freeze();
+        let sps_nal = avc_decoder_config.slice(sps_nal_start..sps_nal_end);
+        let pps_nal = avc_decoder_config.slice(pps_nal_start..pps_nal_end);
+        Ok(InternalParameters {
+            generic_parameters: super::Parameters::Video(super::VideoParameters {
+                rfc6381_codec,
+                pixel_dimensions,
+                pixel_aspect_ratio,
+                frame_rate,
+                extra_data: avc_decoder_config,
+            }),
+            sps_nal,
+            pps_nal,
         })
-    }
-
-    fn sps_nal(&self) -> &[u8] {
-        &self.avc_decoder_config[self.sps_nal.clone()]
-    }
-
-    fn pps_nal(&self) -> &[u8] {
-        &self.avc_decoder_config[self.pps_nal.clone()]
-    }
-
-    pub fn avc_decoder_config(&self) -> &[u8] {
-        &self.avc_decoder_config
-    }
-}
-
-impl super::Parameters for Parameters {
-    fn pixel_dimensions(&self) -> (u32, u32) {
-        self.pixel_dimensions
-    }
-
-    fn pixel_aspect_ratio(&self) -> Option<(u32, u32)> {
-        self.pixel_aspect_ratio
-    }
-
-    fn rfc6381_codec(&self) -> &str {
-        &self.rfc6381_codec
-    }
-
-    fn frame_rate(&self) -> Option<(u32, u32)> {
-        self.frame_rate
     }
 }
 
@@ -471,11 +445,13 @@ impl super::Parameters for Parameters {
 mod tests {
     #[test]
     fn gw_security() {
-        let params = super::Parameters::from_format_specific_params(
+        let params = super::InternalParameters::parse_format_specific_params(
             "packetization-mode=1;\
              profile-level-id=5046302;\
              sprop-parameter-sets=Z00AHpWoLQ9puAgICBAAAAAB,aO48gAAAAAE=").unwrap();
-        assert_eq!(params.sps_nal(), b"\x67\x4d\x00\x1e\x95\xa8\x2d\x0f\x69\xb8\x08\x08\x08\x10");
-        assert_eq!(params.pps_nal(), b"\x68\xee\x3c\x80");
+        assert_eq!(
+            &params.sps_nal[..],
+            b"\x67\x4d\x00\x1e\x95\xa8\x2d\x0f\x69\xb8\x08\x08\x08\x10");
+        assert_eq!(&params.pps_nal[..], b"\x68\xee\x3c\x80");
     }
 }

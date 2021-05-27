@@ -11,14 +11,11 @@ use tokio::pin;
 use tokio_util::codec::Framed;
 use url::Url;
 
-use crate::{Context, Timestamp};
+use crate::{Context, Timestamp, codec::CodecItem};
 
-pub mod application;
-pub mod audio;
 mod parse;
 pub mod rtcp;
 pub mod rtp;
-pub mod video;
 
 const MAX_FORWARD_TIME_JUMP_SECS: u32 = 10;
 
@@ -66,8 +63,7 @@ pub struct Stream {
     /// Number of audio channels, if applicable (`media` is `audio`) and known.
     pub channels: Option<NonZeroU16>,
 
-    /// The parameters, if supplied and of a known codec type.
-    pub parameters: Option<Parameters>,
+    demuxer: Result<crate::codec::Demuxer, Error>,
 
     /// The specified control URL.
     /// This is needed with multiple streams to send `SETUP` requests and
@@ -85,11 +81,14 @@ pub struct Stream {
     state: StreamState,
 }
 
-#[derive(Debug)]
-pub enum Parameters {
-    H264(video::h264::Parameters),
-    Aac(audio::aac::Parameters),
-    Onvif(application::onvif::Parameters),
+impl Stream {
+    /// Returns the parameters for this stream.
+    ///
+    /// Returns `None` on unknown codecs, bad parameters, or if parameters aren't specified
+    /// via SDP. Some codecs allow parameters to be specified in-band instead.
+    pub fn parameters(&self) -> Option<&crate::codec::Parameters> {
+        self.demuxer.as_ref().ok().and_then(|d| d.parameters())
+    }
 }
 
 #[derive(Debug)]
@@ -573,19 +572,6 @@ pub enum PacketItem {
     SenderReport(rtp::SenderReport),
 }
 
-pub(crate) trait Demuxer {
-    fn push(&mut self, input: rtp::Packet) -> Result<(), Error>;
-    fn pull(&mut self) -> Result<Option<DemuxedItem>, Error>;
-}
-
-pub enum DemuxedItem {
-    ParameterChange(video::h264::Parameters),
-    Picture(video::Picture),
-    AudioFrame(audio::aac::Frame),
-    Message(application::onvif::Message),
-    SenderReport(rtp::SenderReport),
-}
-
 impl Session<Playing> {
     /// Returns a stream of packets.
     pub fn pkts(self) -> impl futures::Stream<Item = Result<PacketItem, Error>> {
@@ -599,22 +585,14 @@ impl Session<Playing> {
         }
     }
 
-    pub fn demuxed(mut self) -> Result<impl futures::Stream<Item = Result<DemuxedItem, Error>>, Error> {
-        let mut demuxers: Vec<Option<Box<dyn Demuxer>>> =
-            self.state.presentation.streams
-            .iter_mut()
-            .map(|s| match s.state {
-                StreamState::Playing{..} => {
-                    match s.parameters.take() {
-                        None => bail!("no demuxer for {} stream", s.encoding_name),
-                        Some(Parameters::H264(h264)) => Ok(Some(video::h264::Demuxer::new(h264))),
-                        Some(Parameters::Aac(aac)) => Ok(Some(audio::aac::Demuxer::new(aac))),
-                        Some(Parameters::Onvif(_)) => Ok(Some(application::onvif::Demuxer::new())),
-                    }
-                },
-                _ => Ok(None),
-            })
-            .collect::<Result<_, Error>>()?;
+    pub fn demuxed(mut self) -> Result<impl futures::Stream<Item = Result<CodecItem, Error>>, Error> {
+        for s in &mut self.state.presentation.streams {
+            if matches!(s.state, StreamState::Playing{..}) {
+                if let Err(ref mut e) = s.demuxer {
+                    return Err(std::mem::replace(e, format_err!("(placeholder)")));
+                }
+            }
+        }
         Ok(try_stream! {
             let self_ = self;
             tokio::pin!(self_);
@@ -622,13 +600,18 @@ impl Session<Playing> {
                 let pkt = pkt?;
                 match pkt {
                     PacketItem::RtpPacket(p) => {
-                        let demuxer = demuxers[p.stream_id].as_mut().unwrap();
+                        let self_ = self_.as_mut().project();
+                        let state = self_.state.project();
+                        let demuxer = match &mut state.presentation.streams[p.stream_id].demuxer {
+                            Ok(d) => d,
+                            Err(_) => unreachable!("demuxer was Ok"),
+                        };
                         demuxer.push(p)?;
                         while let Some(demuxed) = demuxer.pull()? {
                             yield demuxed;
                         }
                     },
-                    PacketItem::SenderReport(p) => yield DemuxedItem::SenderReport(p),
+                    PacketItem::SenderReport(p) => yield CodecItem::SenderReport(p),
                 };
             }
         })
