@@ -33,7 +33,7 @@ impl TimestampPrinter {
                     Ok(p) => p,
                 };
 
-                let timestamp = match timeline.advance_to(pkt.rtp_time) {
+                let timestamp = match timeline.place(pkt.rtp_time) {
                     Ok(ts) => ts,
                     Err(e) => return Err(e.context(format!("bad RTP timestamp in RTCP SR {:#?} at {:#?}", &pkt, &rtsp_ctx)).into()),
                 };

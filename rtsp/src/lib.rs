@@ -30,9 +30,10 @@ pub struct ReceivedMessage {
 #[derive(Copy, Clone)]
 pub struct Timestamp {
     /// A timestamp which must be compared to `start`. The top bits are inferred
-    /// from wraparounds of 32-bit RTP timestamps. The `u64` itself is expected
-    /// to never wrap.
-    timestamp: u64,
+    /// from wraparounds of 32-bit RTP timestamps. The `i64` itself is not
+    /// allowed to overflow/underflow; similarly `timestamp - start` is not
+    /// allowed to underflow.
+    timestamp: i64,
 
     /// The codec-specified clock rate, in Hz. Must be non-zero.
     clock_rate: u32,
@@ -44,7 +45,7 @@ pub struct Timestamp {
 impl Timestamp {
     /// Returns time since some arbitrary point before the stream started.
     #[inline]
-    pub fn timestamp(&self) -> u64 {
+    pub fn timestamp(&self) -> i64 {
         self.timestamp
     }
 
@@ -62,8 +63,8 @@ impl Timestamp {
 
     /// Returns elapsed time since the stream start in clock rate units.
     #[inline]
-    pub fn elapsed(&self) -> u64 {
-        self.timestamp - u64::from(self.start)
+    pub fn elapsed(&self) -> i64 {
+        self.timestamp - i64::from(self.start)
     }
 
     /// Returns elapsed time since the stream start in seconds, aka "normal play
@@ -73,9 +74,11 @@ impl Timestamp {
         (self.elapsed() as f64) / (self.clock_rate as f64)
     }
 
-    pub fn try_add(&self, delta: u64) -> Result<Self, Error> {
+    pub fn try_add(&self, delta: u32) -> Result<Self, Error> {
+        // Check for `timestamp` overflow only. We don't need to check for
+        // `timestamp - start` underflow because delta is non-negative.
         Ok(Timestamp {
-            timestamp: self.timestamp.checked_add(delta)
+            timestamp: self.timestamp.checked_add(i64::from(delta))
                 .ok_or_else(|| format_err!("overflow on {:?} + {}", &self, delta))?,
             clock_rate: self.clock_rate,
             start: self.start,

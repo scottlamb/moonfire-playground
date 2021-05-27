@@ -1,4 +1,5 @@
 use failure::{Error, bail, format_err};
+use std::convert::TryFrom;
 
 use crate::Timestamp;
 
@@ -8,10 +9,10 @@ const MAX_FORWARD_TIME_JUMP_SECS: u32 = 10;
 /// from 32-bit (wrapping) RTP timestamps.
 #[derive(Debug)]
 pub(super) struct Timeline {
-    timestamp: u64,
+    timestamp: i64,
     clock_rate: u32,
     start: Option<u32>,
-    max_forward_jump: u32,
+    max_forward_jump: i32,
 }
 
 impl Timeline {
@@ -20,13 +21,13 @@ impl Timeline {
         if clock_rate == 0 {
             bail!("clock_rate=0 rejected to prevent division by zero");
         }
-        let max_forward_jump = MAX_FORWARD_TIME_JUMP_SECS
-            .checked_mul(clock_rate)
-            .ok_or_else(|| format_err!(
-                "clock_rate={} rejected because max forward jump of {} sec exceeds u32::MAX",
+        let max_forward_jump = u64::from(MAX_FORWARD_TIME_JUMP_SECS) * u64::from(clock_rate);
+        let max_forward_jump = i32::try_from(max_forward_jump)
+            .map_err(|_| format_err!(
+                "clock_rate={} rejected because max forward jump of {} sec exceeds i32::MAX",
                 clock_rate, MAX_FORWARD_TIME_JUMP_SECS))?;
         Ok(Timeline {
-            timestamp: u64::from(start.unwrap_or(0)),
+            timestamp: i64::from(start.unwrap_or(0)),
             start,
             clock_rate,
             max_forward_jump,
@@ -36,39 +37,55 @@ impl Timeline {
     /// Advances to the given (wrapping) RTP timestamp, creating a monotonically
     /// increasing [Timestamp]. Errors on excessive or backward time jumps.
     pub(super) fn advance_to(&mut self, rtp_timestamp: u32) -> Result<Timestamp, Error> {
+        let (timestamp, delta) = self.ts_and_delta(rtp_timestamp)?;
+        if !(0..self.max_forward_jump).contains(&delta) {
+            bail!("Timestamp jumped {} ({:.03} sec) from {} to {}; \
+                   policy is to allow 0..{} sec only",
+                  delta, (delta as f64) / f64::from(self.clock_rate), self.timestamp,
+                  timestamp, MAX_FORWARD_TIME_JUMP_SECS);
+        }
+        self.timestamp = timestamp.timestamp;
+        Ok(timestamp)
+    }
+
+    /// Places `rtp_timestamp` on the timeline without advancing the timeline
+    /// backward or applying time jump policy. Will set the NPT epoch if unset.
+    ///
+    /// This is useful for RTP timestamps in RTCP packets. They commonly refer
+    /// to time slightly before the most timestamp of the matching RTP stream.
+    pub(super) fn place(&mut self, rtp_timestamp: u32) -> Result<Timestamp, Error> {
+        Ok(self.ts_and_delta(rtp_timestamp)?.0)
+    }
+
+    fn ts_and_delta(&mut self, rtp_timestamp: u32) -> Result<(Timestamp, i32), Error> {
         let start = match self.start {
             None => {
                 self.start = Some(rtp_timestamp);
-                self.timestamp = u64::from(rtp_timestamp);
+                self.timestamp = i64::from(rtp_timestamp);
                 rtp_timestamp
             },
             Some(start) => start,
         };
-        let forward_delta = rtp_timestamp.wrapping_sub(self.timestamp as u32);
-        let forward_ts = Timestamp {
-            timestamp: self.timestamp.checked_add(u64::from(forward_delta)).ok_or_else(|| {
+        let delta = (rtp_timestamp as i32).wrapping_sub(self.timestamp as i32);
+        let timestamp = self.timestamp.checked_add(i64::from(delta)).ok_or_else(|| {
                 // This probably won't happen even with a hostile server. It'd
-                // take (2^32 - 1) packets (~ 4 billion) to advance the time
-                // this far, even with a clock rate chosen to maximize
-                // max_forward_jump for our MAX_FORWARD_TIME_JUMP_SECS.
-                format_err!("timestamp {} + {} will exceed u64::MAX!",
-                            self.timestamp, forward_delta)
-            })?,
+                // take ~2^31 packets (~ 4 billion) to advance the time this far
+                // forward or backward even with no limits on time jump per
+                // packet.
+                format_err!("timestamp {} + delta {} won't fit in i64!",
+                            self.timestamp, delta)
+            })?;
+
+        // Also error in similarly-unlikely NPT underflow.
+        if timestamp.checked_sub(i64::from(start)).is_none() {
+            bail!("timestamp {} + delta {} - start {} underflows i64!",
+                  self.timestamp, delta, start);
+        }
+        Ok((Timestamp {
+            timestamp,
             clock_rate: self.clock_rate,
             start,
-        };
-        if forward_delta > self.max_forward_jump {
-            let f64_clock_rate = f64::from(self.clock_rate);
-            let backward_delta = (self.timestamp as u32).wrapping_sub(rtp_timestamp);
-            bail!("Timestamp jumped:\n\
-                  * forward by  {:10} ({:10.03} sec) from {} to {}, more than allowed {} sec OR\n\
-                  * backward by {:10} ({:10.03} sec), more than allowed 0 sec",
-                  forward_delta, (forward_delta as f64) / f64_clock_rate, self.timestamp,
-                  forward_ts, MAX_FORWARD_TIME_JUMP_SECS, backward_delta,
-                  (backward_delta as f64) / f64_clock_rate);
-        }
-        self.timestamp = forward_ts.timestamp;
-        Ok(forward_ts)
+        }, delta))
     }
 }
 
@@ -90,6 +107,11 @@ mod tests {
         let mut t = Timeline::new(Some(100), 90_000).unwrap();
         t.advance_to(99).unwrap_err();
 
+        // ...but do allow backward RTP timestamps in RTP.
+        let mut t = Timeline::new(Some(100), 90_000).unwrap();
+        assert_eq!(t.place(99).unwrap().elapsed(), -1);
+        assert_eq!(t.advance_to(101).unwrap().elapsed(), 1);
+
         // Normal usage.
         let mut t = Timeline::new(Some(42), 90_000).unwrap();
         assert_eq!(t.advance_to(83).unwrap().elapsed(), 83 - 42);
@@ -102,5 +124,13 @@ mod tests {
         // No initial rtptime.
         let mut t = Timeline::new(None, 90_000).unwrap();
         assert_eq!(t.advance_to(218250000).unwrap().elapsed(), 0);
+    }
+
+    #[test]
+    fn cast() {
+        let a = 0x1FFFF_FFFFi64;
+        let b = 0x10000_0000i64;
+        assert_eq!(a as i32, -1);
+        assert_eq!(b as i32, 0);
     }
 }

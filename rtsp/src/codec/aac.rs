@@ -25,7 +25,7 @@ use super::CodecItem;
 pub(super) struct AudioSpecificConfig {
     /// See ISO/IEC 14496-3 Table 1.3.
     audio_object_type: u8,
-    frame_length: NonZeroU32,
+    frame_length: NonZeroU16,
     sampling_frequency: u32,
     channels: &'static ChannelConfig,
 }
@@ -108,12 +108,12 @@ impl AudioSpecificConfig {
 
         // GASpecificConfig, ISO/IEC 14496-3 section 4.4.1.
         let frame_length = match (audio_object_type, r.read_bool()?) {
-            (3 /* AAC SR */, false) => NonZeroU32::new(256).expect("non-zero"),
+            (3 /* AAC SR */, false) => NonZeroU16::new(256).expect("non-zero"),
             (3 /* AAC SR */, true) => bail!("frame_length_flag must be false for AAC SSR"),
-            (23 /* ER AAC LD */, false) => NonZeroU32::new(512).expect("non-zero"),
-            (23 /* ER AAC LD */, true) => NonZeroU32::new(480).expect("non-zero"),
-            (_, false) => NonZeroU32::new(1024).expect("non-zero"),
-            (_, true) => NonZeroU32::new(960).expect("non-zero"),
+            (23 /* ER AAC LD */, false) => NonZeroU16::new(512).expect("non-zero"),
+            (23 /* ER AAC LD */, true) => NonZeroU16::new(480).expect("non-zero"),
+            (_, false) => NonZeroU16::new(1024).expect("non-zero"),
+            (_, true) => NonZeroU16::new(960).expect("non-zero"),
         };
 
         Ok(AudioSpecificConfig {
@@ -355,7 +355,7 @@ fn parse_format_specific_params(
         config: super::AudioCodecConfig::Aac(parsed),
         clock_rate,
         rfc6381_codec,
-        frame_length,
+        frame_length: frame_length.map(NonZeroU32::from),
         extra_data: Bytes::from(config),
     })
 }
@@ -365,7 +365,7 @@ pub(crate) struct Demuxer {
     parameters: super::Parameters,
 
     /// This is in parameters but duplicated here to avoid destructuring.
-    frame_length: NonZeroU32,
+    frame_length: NonZeroU16,
     state: DemuxerState,
 }
 
@@ -485,7 +485,7 @@ impl Demuxer {
                         println!("au {}: len-{}, fragmented", &pkt.timestamp, size);
                         self.state = DemuxerState::Ready(super::AudioFrame {
                             ctx: pkt.rtsp_ctx,
-                            frame_length: self.frame_length,
+                            frame_length: NonZeroU32::from(self.frame_length),
                             stream_id: pkt.stream_id,
                             timestamp: pkt.timestamp,
                             data: std::mem::take(&mut frag.buf).freeze(),
@@ -559,8 +559,11 @@ impl Demuxer {
                 let frame = super::AudioFrame {
                     ctx: agg.ctx,
                     stream_id: agg.stream_id,
-                    frame_length: self.frame_length,
-                    timestamp: agg.timestamp.try_add(u64::from(agg.frame_i) * u64::from(self.frame_length.get()))?,
+                    frame_length: NonZeroU32::from(self.frame_length),
+
+                    // u16 * u16 can't overflow u32, but i64 + u32 can overflow i64.
+                    timestamp: agg.timestamp.try_add(
+                        u32::from(agg.frame_i) * u32::from(self.frame_length.get()))?,
                     data: agg.buf.slice(agg.data_off..agg.data_off+size),
                 };
                 agg.data_off += size;

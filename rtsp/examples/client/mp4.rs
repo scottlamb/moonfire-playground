@@ -94,7 +94,7 @@ struct TrakTracker {
     /// This lags one sample behind calls to `add_sample` because each sample's duration
     /// is calculated using the PTS of the following sample.
     durations: Vec<(u32, u32)>,
-    last_pts: Option<u64>,
+    last_pts: Option<i64>,
     tot_duration: u64,
 }
 
@@ -108,8 +108,7 @@ impl TrakTracker {
         self.next_pos = Some(pos + size);
         if let Some(last_pts) = self.last_pts.replace(timestamp.timestamp()) {
             let duration = timestamp.timestamp().checked_sub(last_pts).unwrap();
-            assert!(duration > 0);
-            self.tot_duration += duration;
+            self.tot_duration += u64::try_from(duration).unwrap();
             let duration = u32::try_from(duration)?;
             match self.durations.last_mut() {
                 Some((s, d)) if *d == duration => *s += 1,
