@@ -48,6 +48,7 @@ pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credential
     let stop = tokio::signal::ctrl_c();
 
     let mut session = moonfire_rtsp::client::Session::describe(url, credentials).await?;
+    info!("Streams: {:#?}", session.streams());
     let mut all_stats = vec![None; session.streams().len()];
     let mut duration_from_fps = vec![0; session.streams().len()];
     for i in 0..session.streams().len() {

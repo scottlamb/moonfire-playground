@@ -14,7 +14,7 @@ use crate::client::rtp;
 pub mod aac;
 pub mod h264;
 pub mod onvif;
-pub mod g711;
+pub mod simple_audio;
 
 pub enum CodecItem {
     VideoFrame(VideoFrame),
@@ -143,7 +143,7 @@ impl AudioParameters {
         &self.extra_data
     }
 
-    /// Builds an `.mp4` `AudioSampleEntry` box (as defined in ISO/IEC 14496-12) if possible.
+    /// Builds an `.mp4` `SimpleAudioEntry` box (as defined in ISO/IEC 14496-12) if possible.
     /// Not all codecs can be placed into a `.mp4` file, and even for supported codecs there
     /// may be unsupported edge cases.
     pub fn sample_entry(&self) -> Result<Bytes, Error> {
@@ -303,7 +303,7 @@ impl bytes::Buf for VideoFrame {
 #[derive(Debug)]
 pub(crate) enum Demuxer {
     Aac(aac::Demuxer),
-    G711(g711::Demuxer),
+    SimpleAudio(simple_audio::Demuxer),
     H264(h264::Demuxer),
     Onvif(onvif::Demuxer),
 }
@@ -324,8 +324,11 @@ impl Demuxer {
             ("audio", "mpeg4-generic") => Ok(
                 Demuxer::Aac(aac::Demuxer::new(clock_rate, channels, format_specific_params)?)
             ),
-            ("audio", "pcma") | ("audio", "pcmu") => Ok(
-                Demuxer::G711(g711::Demuxer::new(clock_rate))
+            ("audio", "l8") | ("audio", "pcma") | ("audio", "pcmu") => Ok(
+                Demuxer::SimpleAudio(simple_audio::Demuxer::new(clock_rate, 0))
+            ),
+            ("audio", "l16") => Ok(
+                Demuxer::SimpleAudio(simple_audio::Demuxer::new(clock_rate, 1))
             ),
             ("application", "vnd.onvif.metadata") => Ok(
                 Demuxer::Onvif(onvif::Demuxer::new(CompressionType::Uncompressed))
@@ -349,27 +352,27 @@ impl Demuxer {
     pub(crate) fn parameters(&self) -> Option<&Parameters> {
         match self {
             Demuxer::Aac(d) => d.parameters(),
-            Demuxer::G711(d) => d.parameters(),
             Demuxer::H264(d) => d.parameters(),
             Demuxer::Onvif(d) => d.parameters(),
+            Demuxer::SimpleAudio(d) => d.parameters(),
         }
     }
 
     pub(crate) fn push(&mut self, input: rtp::Packet) -> Result<(), Error> {
         match self {
             Demuxer::Aac(d) => d.push(input),
-            Demuxer::G711(d) => d.push(input),
             Demuxer::H264(d) => d.push(input),
             Demuxer::Onvif(d) => d.push(input),
+            Demuxer::SimpleAudio(d) => d.push(input),
         }
     }
 
     pub(crate) fn pull(&mut self) -> Result<Option<CodecItem>, Error> {
         match self {
             Demuxer::Aac(d) => d.pull(),
-            Demuxer::G711(d) => d.pull(),
             Demuxer::H264(d) => d.pull(),
             Demuxer::Onvif(d) => d.pull(),
+            Demuxer::SimpleAudio(d) => d.pull(),
         }
     }
 }

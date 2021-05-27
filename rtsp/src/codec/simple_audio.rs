@@ -1,6 +1,5 @@
-//! G.711 (PCMA and PCMU) support.
-//! https://datatracker.ietf.org/doc/html/rfc3551#section-4.5.14
-//! https://www.itu.int/rec/T-REC-G.711
+//! Fixed-size audio sample codecs, including G.711 (PCMA and PCMU), L8, and L16.
+//! https://datatracker.ietf.org/doc/html/rfc3551#section-4.5
 
 use std::convert::TryFrom;
 use std::num::NonZeroU32;
@@ -15,10 +14,14 @@ use super::CodecItem;
 pub(crate) struct Demuxer {
     parameters: super::Parameters,
     pending: Option<super::AudioFrame>,
+    shift: u32,
+    mask: u32,
 }
 
 impl Demuxer {
-    pub(super) fn new(clock_rate: u32) -> Self {
+    /// Creates a new Demuxer.
+    /// `shift` is represents the size of a sample: 0 for 1 byte, 1 for 2 bytes, 2 for 4 bytes, etc.
+    pub(super) fn new(clock_rate: u32, shift: u32) -> Self {
         Self {
             parameters: super::Parameters::Audio(super::AudioParameters {
                 rfc6381_codec: None,
@@ -27,6 +30,8 @@ impl Demuxer {
                 extra_data: Bytes::new(),
                 config: super::AudioCodecConfig::Other,
             }),
+            shift,
+            mask: (1 << shift) - 1,
             pending: None,
         }
     }
@@ -35,14 +40,19 @@ impl Demuxer {
         Some(&self.parameters)
     }
 
+    fn frame_length(&self, payload_len: usize) -> Option<NonZeroU32> {
+        let len = u32::try_from(payload_len).ok()?;
+        if (len & self.mask) != 0 {
+            return None;
+        }
+        NonZeroU32::new(len >> self.shift)
+    }
+
     pub(super) fn push(&mut self, pkt: crate::client::rtp::Packet) -> Result<(), Error> {
         assert!(self.pending.is_none());
-
-        // There is one byte per sample so the frame length in samples is simply the byte length.
-        let frame_length = u32::try_from(pkt.payload.len())
-            .map_err(|_| format_err!("crazy long G.711 payload ({} bytes)", pkt.payload.len()))?;
-        let frame_length = NonZeroU32::new(frame_length)
-            .ok_or_else(|| format_err!("zero-length G.711 payload"))?;
+        let frame_length = self.frame_length(pkt.payload.len())
+            .ok_or_else(|| format_err!("invalid length {} for payload of {}-byte audio samples",
+                                       pkt.payload.len(), 1 << self.shift))?;
         self.pending = Some(super::AudioFrame {
             ctx: pkt.rtsp_ctx,
             stream_id: pkt.stream_id,
