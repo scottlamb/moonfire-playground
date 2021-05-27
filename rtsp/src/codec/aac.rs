@@ -201,7 +201,10 @@ macro_rules! write_descriptor {
 /// Returns an MP4AudioSampleEntry (`mp4a`) box as in ISO/IEC 14496-14 section 5.6.1.
 /// `config` should be a raw AudioSpecificConfig (matching `parsed`).
 pub(super) fn get_mp4a_box(parameters: &super::AudioParameters) -> Result<Bytes, Error> {
-    let parsed = &parameters.config;
+    let parsed = match parameters.config {
+        super::AudioCodecConfig::Aac(ref c) => c,
+        _ => unreachable!(),
+    };
     let config = &parameters.extra_data[..];
     let mut buf = BytesMut::new();
 
@@ -346,10 +349,10 @@ fn parse_format_specific_params(
     }
 
     // https://datatracker.ietf.org/doc/html/rfc6381#section-3.3
-    let rfc6381_codec = format!("mp4a.40.{}", parsed.audio_object_type);
+    let rfc6381_codec = Some(format!("mp4a.40.{}", parsed.audio_object_type));
     let frame_length = Some(parsed.frame_length);
     Ok(super::AudioParameters {
-        config: parsed,
+        config: super::AudioCodecConfig::Aac(parsed),
         clock_rate,
         rfc6381_codec,
         frame_length,
@@ -417,11 +420,15 @@ impl Demuxer {
         let format_specific_params = format_specific_params
             .ok_or_else(|| format_err!("AAC requires format specific params"))?;
         let parameters = parse_format_specific_params(clock_rate, format_specific_params)?;
-        if matches!(channels, Some(c) if c.get() != parameters.config.channels.channels) {
+        let parsed = match parameters.config {
+            super::AudioCodecConfig::Aac(ref c) => c,
+            _ => unreachable!(),
+        };
+        if matches!(channels, Some(c) if c.get() != parsed.channels.channels) {
             bail!("Expected RTP channels {:?} and AAC channels {:?} to match",
-                  channels, parameters.config.channels);
+                  channels, parsed.channels);
         }
-        let frame_length = parameters.config.frame_length;
+        let frame_length = parsed.frame_length;
         Ok(Self {
             parameters: super::Parameters::Audio(parameters),
             frame_length,

@@ -472,8 +472,7 @@ impl Session<Described> {
         }
         let proposed_channel_id = self.state.channels.next_unassigned()?;
         let url = stream.control.as_ref().unwrap_or(&self.state.presentation.control).clone();
-        let response = self.conn.send(
-            &mut rtsp_types::Request::builder(rtsp_types::Method::Setup, rtsp_types::Version::V1_0)
+        let mut req = rtsp_types::Request::builder(rtsp_types::Method::Setup, rtsp_types::Version::V1_0)
             .request_uri(url)
             .header(
                 rtsp_types::headers::TRANSPORT,
@@ -482,15 +481,18 @@ impl Session<Described> {
                     proposed_channel_id,
                     proposed_channel_id + 1)
             )
-            .header(crate::X_DYNAMIC_RATE.clone(), "1".to_owned())
-            .build(Bytes::new())).await?;
+            .header(crate::X_DYNAMIC_RATE.clone(), "1".to_owned());
+        if let Some(ref s) = self.state.session_id {
+            req = req.header(rtsp_types::headers::SESSION, s.clone());
+        }
+        let response = self.conn.send(&mut req.build(Bytes::new())).await?;
         debug!("SETUP response: {:#?}", &response);
         let response = parse::parse_setup(&response)?;
         match self.state.session_id.as_ref() {
-            //Some(old) if old != response.session_id => {
-            //    bail!("SETUP response changed session id from {:?} to {:?}",
-            //        old, response.session_id);
-            //},
+            Some(old) if old != response.session_id => {
+                bail!("SETUP response changed session id from {:?} to {:?}",
+                      old, response.session_id);
+            },
             Some(_) => {},
             None => self.state.session_id = Some(response.session_id.to_owned()),
         };
@@ -538,9 +540,9 @@ impl Session<Described> {
                         // it. Buggy cameras (GW4089IP) specify bogus values.
                         1 => None,
                         _ => {
-                            if initial_rtptime.is_none() {
-                                bail!("Missing rtptime after PLAY response, stream {}/{:#?}", i, s);
-                            }
+                            //if initial_rtptime.is_none() {
+                            //    bail!("Missing rtptime after PLAY response, stream {}/{:#?}", i, s);
+                            //}
                             initial_rtptime
                         },
                     };

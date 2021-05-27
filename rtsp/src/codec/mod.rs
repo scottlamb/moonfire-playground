@@ -14,6 +14,7 @@ use crate::client::rtp;
 pub mod aac;
 pub mod h264;
 pub mod onvif;
+pub mod g711;
 
 pub enum CodecItem {
     VideoFrame(VideoFrame),
@@ -99,13 +100,17 @@ impl std::fmt::Debug for VideoParameters {
 
 #[derive(Clone)]
 pub struct AudioParameters {
-    rfc6381_codec: String,
+    rfc6381_codec: Option<String>,
     frame_length: Option<NonZeroU32>,
     clock_rate: u32,
     extra_data: Bytes,
+    config: AudioCodecConfig,
+}
 
-    // TODO: aac-specific stuff should go into an enum when other codecs are added.
-    config: aac::AudioSpecificConfig,
+#[derive(Clone)]
+enum AudioCodecConfig {
+    Aac(aac::AudioSpecificConfig),
+    Other,
 }
 
 impl std::fmt::Debug for AudioParameters {
@@ -119,8 +124,8 @@ impl std::fmt::Debug for AudioParameters {
 }
 
 impl AudioParameters {
-    pub fn rfc6381_codec(&self) -> &str {
-        &self.rfc6381_codec
+    pub fn rfc6381_codec(&self) -> Option<&str> {
+        self.rfc6381_codec.as_deref()
     }
 
     /// The length of each frame (in clock_rate units), if fixed.
@@ -297,8 +302,9 @@ impl bytes::Buf for VideoFrame {
 
 #[derive(Debug)]
 pub(crate) enum Demuxer {
-    H264(h264::Demuxer),
     Aac(aac::Demuxer),
+    G711(g711::Demuxer),
+    H264(h264::Demuxer),
     Onvif(onvif::Demuxer),
 }
 
@@ -318,6 +324,9 @@ impl Demuxer {
             ("audio", "mpeg4-generic") => Ok(
                 Demuxer::Aac(aac::Demuxer::new(clock_rate, channels, format_specific_params)?)
             ),
+            ("audio", "pcma") | ("audio", "pcmu") => Ok(
+                Demuxer::G711(g711::Demuxer::new(clock_rate))
+            ),
             ("application", "vnd.onvif.metadata") => Ok(
                 Demuxer::Onvif(onvif::Demuxer::new(CompressionType::Uncompressed))
             ),
@@ -330,30 +339,36 @@ impl Demuxer {
             ("application", "vnd.onvif.metadata.exi.ext") => Ok(
                 Demuxer::Onvif(onvif::Demuxer::new(CompressionType::ExiInBand))
             ),
-            (_, _) => bail!("no demuxer for media/encoding_name {}/{}", media, encoding_name),
+            (_, _) => {
+                log::info!("no demuxer for media/encoding_name {}/{}", media, encoding_name);
+                bail!("no demuxer for media/encoding_name {}/{}", media, encoding_name);
+            },
         }
     }
 
     pub(crate) fn parameters(&self) -> Option<&Parameters> {
         match self {
-            Demuxer::H264(d) => d.parameters(),
             Demuxer::Aac(d) => d.parameters(),
+            Demuxer::G711(d) => d.parameters(),
+            Demuxer::H264(d) => d.parameters(),
             Demuxer::Onvif(d) => d.parameters(),
         }
     }
 
     pub(crate) fn push(&mut self, input: rtp::Packet) -> Result<(), Error> {
         match self {
-            Demuxer::H264(d) => d.push(input),
             Demuxer::Aac(d) => d.push(input),
+            Demuxer::G711(d) => d.push(input),
+            Demuxer::H264(d) => d.push(input),
             Demuxer::Onvif(d) => d.push(input),
         }
     }
 
     pub(crate) fn pull(&mut self) -> Result<Option<CodecItem>, Error> {
         match self {
-            Demuxer::H264(d) => d.pull(),
             Demuxer::Aac(d) => d.pull(),
+            Demuxer::G711(d) => d.pull(),
+            Demuxer::H264(d) => d.pull(),
             Demuxer::Onvif(d) => d.pull(),
         }
     }

@@ -3,6 +3,7 @@
 use bytes::{Buf, Bytes};
 use failure::{Error, bail, format_err};
 use log::trace;
+use pretty_hex::PrettyHex;
 
 /// An RTP packet.
 #[derive(Debug)]
@@ -77,15 +78,17 @@ impl StrictSequenceChecker {
         // packets can never start with '$', so this shouldn't interfere with well-behaved
         // servers.
         if data.len() > 4 && data[0] == b'$'
-           && usize::from(u16::from_be_bytes([data[2], data[3]])) == data.len() - 4 
+           && usize::from(u16::from_be_bytes([data[2], data[3]])) <= data.len() - 4
         {
             log::debug!("stripping extra interleaved data header");
             data.advance(4);
+            // also remove suffix? dunno.
         }
 
         let reader = rtp_rs::RtpReader::new(&data[..])
-            .map_err(|e| format_err!("corrupt RTP header while expecting seq={:04x?} at {:#?}: {:?}",
-                                     self.next_seq, &rtsp_ctx, e))?;
+            .map_err(|e| format_err!(
+                "corrupt RTP header while expecting seq={:04x?} at {:#?}: {:?}\n{:#?}",
+                self.next_seq, &rtsp_ctx, e, data.hex_dump()))?;
         let sequence_number = u16::from_be_bytes([data[2], data[3]]); // I don't like rtsp_rs::Seq.
         let timestamp = match timeline.advance_to(reader.timestamp()) {
             Ok(ts) => ts,
