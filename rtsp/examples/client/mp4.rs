@@ -26,6 +26,21 @@ use std::path::PathBuf;
 use tokio::io::{AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use url::Url;
 
+#[derive(structopt::StructOpt)]
+pub(crate) struct Opts {
+    #[structopt(default_value, long)]
+    initial_timestamp_mode: moonfire_rtsp::client::InitialTimestampMode,
+
+    #[structopt(long)]
+    no_video: bool,
+
+    #[structopt(long)]
+    no_audio: bool,
+
+    #[structopt(parse(try_from_str))]
+    out: PathBuf,
+}
+
 /// Writes a box length for everything appended in the supplied scope.
 macro_rules! write_box {
     ($buf:expr, $fourcc:expr, $b:block) => {{
@@ -451,11 +466,11 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
     }
 }
 
-pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credentials>,
-                 no_video: bool, no_audio: bool, out: PathBuf) -> Result<(), Error> {
+pub(crate) async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credentials>,
+                        opts: Opts) -> Result<(), Error> {
     let stop = tokio::signal::ctrl_c();
     let mut session = moonfire_rtsp::client::Session::describe(url, credentials).await?;
-    let video_stream_i = if no_video {
+    let video_stream_i = if opts.no_video {
         None
     } else {
         session.streams().iter().position(|s| s.media == "video" && s.parameters().is_some())
@@ -471,7 +486,7 @@ pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credential
     } else {
         None
     };
-    let audio_stream_i = if no_audio {
+    let audio_stream_i = if opts.no_audio {
         None
     } else {
         session.streams().iter().position(|s| s.media == "audio" && s.parameters().is_some())
@@ -487,10 +502,13 @@ pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credential
     } else {
         None
     };
-    let session = session.play().await?.demuxed()?;
+    let session = session.play(
+        moonfire_rtsp::client::PlayQuirks::new()
+            .initial_timestamp_mode(opts.initial_timestamp_mode)
+    ).await?.demuxed()?;
 
     // Read RTP data.
-    let out = tokio::fs::File::create(out).await?;
+    let out = tokio::fs::File::create(opts.out).await?;
     let mut mp4 = Mp4Writer::new(video_parameters.clone(), audio_parameters.clone(), out).await?;
 
     tokio::pin!(session);

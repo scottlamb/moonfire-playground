@@ -94,8 +94,8 @@ impl StrictSequenceChecker {
         let sequence_number = u16::from_be_bytes([data[2], data[3]]); // I don't like rtsp_rs::Seq.
         let timestamp = match timeline.advance_to(reader.timestamp()) {
             Ok(ts) => ts,
-            Err(e) => return Err(e.context(format!("timestamp error in seq={:04x} {:#?}",
-                                                   sequence_number, &rtsp_ctx)).into()),
+            Err(e) => return Err(e.context(format!("timestamp error in stream {} seq={:04x} {:#?}",
+                                                   stream_id, sequence_number, &rtsp_ctx)).into()),
         };
         let ssrc = reader.ssrc();
         if (self.ssrc != None && self.ssrc != Some(ssrc))

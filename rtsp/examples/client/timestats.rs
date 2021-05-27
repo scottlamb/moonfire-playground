@@ -5,6 +5,12 @@ use moonfire_rtsp::codec::{CodecItem, Parameters};
 use rtsp_types::Url;
 use std::convert::TryFrom;
 
+#[derive(structopt::StructOpt)]
+pub(crate) struct Opts {
+    #[structopt(default_value, long)]
+    initial_timestamp_mode: moonfire_rtsp::client::InitialTimestampMode,
+}
+
 #[derive(Clone)]
 struct StreamStats {
     pkts: u64,
@@ -44,7 +50,9 @@ fn process(stream_id: usize, all_stats: &mut [Option<StreamStats>], ts: moonfire
     stats.pkts += 1;
 }
 
-pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credentials>) -> Result<(), Error> {
+pub(crate) async fn run(
+    url: Url, credentials: Option<moonfire_rtsp::client::Credentials>, opts: Opts
+) -> Result<(), Error> {
     let stop = tokio::signal::ctrl_c();
 
     let mut session = moonfire_rtsp::client::Session::describe(url, credentials).await?;
@@ -62,7 +70,10 @@ pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credential
         }
         session.setup(i).await?;
     }
-    let session = session.play().await?.demuxed()?;
+    let session = session.play(
+        moonfire_rtsp::client::PlayQuirks::new()
+        .initial_timestamp_mode(opts.initial_timestamp_mode)
+    ).await?.demuxed()?;
 
     // Read RTP data.
     tokio::pin!(session);

@@ -22,6 +22,76 @@ const MAX_FORWARD_TIME_JUMP_SECS: u32 = 10;
 /// Duration between keepalive RTSP requests during [Playing] state.
 pub const KEEPALIVE_DURATION: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Describes how to handle the `rtptime` parameter normally seem in the `RTP-Info header.
+/// This parameter is used to map each stream's RTP timestamp to NPT ("normal play time"),
+/// allowing multiple streams to be played in sync.
+#[derive(Copy, Clone, Debug)]
+pub enum InitialTimestampMode {
+    /// Default policy: currently `Require` when playing multiple streams, `Ignore` otherwise.
+    Default,
+
+    /// Require the `rtptime` parameter be present and use it to set NPT. Use when accurate
+    /// multi-stream NPT is important.
+    Require,
+
+    /// Ignore the `rtptime` parameter and assume the first received packet for each
+    /// stream is at NPT 0. Use with cameras that are known to set `rtptime` incorrectly.
+    Ignore,
+
+    /// Use the `rtptime` parameter if present for all streams being played; otherwise assume the
+    /// first received packet for each stream is at NPT 0.
+    UseIfAllPresent,
+}
+
+impl Default for InitialTimestampMode {
+    fn default() -> Self {
+        InitialTimestampMode::Default
+    }
+}
+
+impl ToString for InitialTimestampMode {
+    fn to_string(&self) -> String {
+        match self {
+            InitialTimestampMode::Default => "default",
+            InitialTimestampMode::Require => "require",
+            InitialTimestampMode::Ignore => "ignore",
+            InitialTimestampMode::UseIfAllPresent => "use-if-all-present",
+        }.to_owned()
+    }
+}
+
+impl std::str::FromStr for InitialTimestampMode {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "default" => InitialTimestampMode::Default,
+            "require" => InitialTimestampMode::Require,
+            "ignore" => InitialTimestampMode::Ignore,
+            "use-if-all-present" => InitialTimestampMode::UseIfAllPresent,
+            _ => bail!("Initial timestamp mode {:?} not understood", s),
+        })
+    }
+}
+
+/// Adjustments to make on `PLAY` for non-compliant server implementations.
+pub struct PlayQuirks {
+    initial_timestamp_mode: InitialTimestampMode,
+}
+
+impl PlayQuirks {
+    pub fn new() -> Self {
+        Self { initial_timestamp_mode: InitialTimestampMode::Default }
+    }
+
+    pub fn initial_timestamp_mode(self, initial_timestamp_mode: InitialTimestampMode) -> Self {
+        Self {
+            initial_timestamp_mode,
+            ..self
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Presentation {
     pub streams: Vec<Stream>,
@@ -508,7 +578,7 @@ impl Session<Described> {
     /// Sends a `PLAY` request for the entire presentation.
     /// The presentation must support aggregate control, as defined in [RFC 2326
     /// section 1.3](https://tools.ietf.org/html/rfc2326#section-1.3).
-    pub async fn play(mut self) -> Result<Session<Playing>, Error> {
+    pub async fn play(mut self, quirks: PlayQuirks) -> Result<Session<Playing>, Error> {
         let session_id = self.state.session_id.take().ok_or_else(|| format_err!("must SETUP before PLAY"))?;
         trace!("PLAY with channel mappings: {:#?}", &self.state.channels);
         let response = self.conn.send(
@@ -524,6 +594,11 @@ impl Session<Described> {
             .filter(|s| matches!(s.state, StreamState::Init(_)))
             .count();
 
+        let all_have_time = self.state.presentation.streams.iter().all(|s| match s.state {
+            StreamState::Init(StreamStateInit { initial_rtptime, .. }) => initial_rtptime.is_some(),
+            _ => true,
+        });
+
         // Move all streams that have been set up from Init to Playing state. Check that required
         // parameters are present while doing so.
         for (i, s) in self.state.presentation.streams.iter_mut().enumerate() {
@@ -534,17 +609,20 @@ impl Session<Described> {
                     ssrc,
                     ..
                 }) => {
-                    // The initial rtptime is useful for syncing multiple streams:
-                    let initial_rtptime = match setup_streams {
-                        // If there's only a single stream, don't require or use
-                        // it. Buggy cameras (GW4089IP) specify bogus values.
-                        1 => None,
-                        _ => {
-                            //if initial_rtptime.is_none() {
-                            //    bail!("Missing rtptime after PLAY response, stream {}/{:#?}", i, s);
-                            //}
+                    let initial_rtptime = match quirks.initial_timestamp_mode {
+                        InitialTimestampMode::Require
+                        | InitialTimestampMode::Default if setup_streams > 1 => {
+                            if initial_rtptime.is_none() {
+                                bail!(
+                                    "Expected rtptime on PLAY with mode {:?}, missing on stream \
+                                     {} ({:?}). Consider setting initial timestamp mode \
+                                     use-if-all-present.",
+                                    quirks.initial_timestamp_mode, i, &s.control);
+                            }
                             initial_rtptime
                         },
+                        InitialTimestampMode::UseIfAllPresent if all_have_time => initial_rtptime,
+                        _ => None,
                     };
                     s.state = StreamState::Playing {
                         timeline: Timeline::new(initial_rtptime, s.clock_rate)?,

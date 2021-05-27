@@ -6,7 +6,7 @@ mod timestats;
 
 use failure::Error;
 use log::{error, info};
-use std::{fmt::Write, path::PathBuf, str::FromStr};
+use std::{fmt::Write, str::FromStr};
 use structopt::StructOpt;
 
 #[derive(StructOpt)]
@@ -27,14 +27,8 @@ enum Cmd {
         #[structopt(flatten)]
         src: Source,
 
-        #[structopt(long)]
-        no_video: bool,
-
-        #[structopt(long)]
-        no_audio: bool,
-
-        #[structopt(parse(try_from_str))]
-        out: PathBuf,
+        #[structopt(flatten)]
+        opts: mp4::Opts,
     },
 
     Metadata {
@@ -45,6 +39,9 @@ enum Cmd {
     Timestats {
         #[structopt(flatten)]
         src: Source,
+
+        #[structopt(flatten)]
+        opts: timestats::Opts,
     },
 }
 
@@ -103,9 +100,10 @@ fn creds(username: Option<String>, password: Option<String>) -> Option<moonfire_
 async fn main_inner() -> Result<(), Error> {
     let cmd = Cmd::from_args();
     match cmd {
-        Cmd::Mp4 { out, src, no_video, no_audio } => mp4::run(
-            src.url, creds(src.username, src.password), no_video, no_audio, out).await,
+        Cmd::Mp4 { src, opts } => mp4::run(src.url, creds(src.username, src.password), opts).await,
         Cmd::Metadata { src } => metadata::run(src.url, creds(src.username, src.password)).await,
-        Cmd::Timestats { src } => timestats::run(src.url, creds(src.username, src.password)).await,
+        Cmd::Timestats { src, opts } => timestats::run(
+            src.url, creds(src.username, src.password), opts
+        ).await,
     }
 }

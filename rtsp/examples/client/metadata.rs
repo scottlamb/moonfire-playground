@@ -12,9 +12,8 @@ pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credential
         .position(|s| matches!(s.parameters(), Some(moonfire_rtsp::codec::Parameters::Message(..))))
         .ok_or_else(|| format_err!("couldn't find onvif stream"))?;
     session.setup(onvif_stream_i).await?;
-    let session = session.play().await?.demuxed()?;
+    let session = session.play(moonfire_rtsp::client::PlayQuirks::new()).await?.demuxed()?;
 
-    // Read RTP data.
     tokio::pin!(session);
     tokio::pin!(stop);
     loop {
