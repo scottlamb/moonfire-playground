@@ -4,6 +4,7 @@ use once_cell::sync::Lazy;
 use rtsp_types::Message;
 use std::convert::TryFrom;
 use std::fmt::{Debug, Display};
+use std::num::NonZeroU32;
 
 pub mod client;
 pub mod codec;
@@ -36,7 +37,7 @@ pub struct Timestamp {
     timestamp: i64,
 
     /// The codec-specified clock rate, in Hz. Must be non-zero.
-    clock_rate: u32,
+    clock_rate: NonZeroU32,
 
     /// The stream's starting time, as specified in the RTSP `RTP-Info` header.
     start: u32,
@@ -55,9 +56,9 @@ impl Timestamp {
         self.start
     }
 
-    /// Returns codec-specified clock rate, in Hz. Must be non-zero.
+    /// Returns codec-specified clock rate, in Hz.
     #[inline]
-    pub fn clock_rate(&self) -> u32 {
+    pub fn clock_rate(&self) -> NonZeroU32 {
         self.clock_rate
     }
 
@@ -71,7 +72,7 @@ impl Timestamp {
     /// time" (NPT).
     #[inline]
     pub fn elapsed_secs(&self) -> f64 {
-        (self.elapsed() as f64) / (self.clock_rate as f64)
+        (self.elapsed() as f64) / (self.clock_rate.get() as f64)
     }
 
     pub fn try_add(&self, delta: u32) -> Result<Self, Error> {

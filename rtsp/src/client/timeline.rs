@@ -1,5 +1,5 @@
 use failure::{Error, bail, format_err};
-use std::convert::TryFrom;
+use std::{convert::TryFrom, num::NonZeroU32};
 
 use crate::Timestamp;
 
@@ -10,7 +10,7 @@ const MAX_FORWARD_TIME_JUMP_SECS: u32 = 10;
 #[derive(Debug)]
 pub(super) struct Timeline {
     timestamp: i64,
-    clock_rate: u32,
+    clock_rate: NonZeroU32,
     start: Option<u32>,
     max_forward_jump: i32,
 }
@@ -18,10 +18,9 @@ pub(super) struct Timeline {
 impl Timeline {
     /// Creates a new timeline, erroring on crazy clock rates.
     pub(super) fn new(start: Option<u32>, clock_rate: u32) -> Result<Self, Error> {
-        if clock_rate == 0 {
-            bail!("clock_rate=0 rejected to prevent division by zero");
-        }
-        let max_forward_jump = u64::from(MAX_FORWARD_TIME_JUMP_SECS) * u64::from(clock_rate);
+        let clock_rate = NonZeroU32::new(clock_rate)
+            .ok_or_else(|| format_err!("clock_rate=0 rejected to prevent division by zero"))?;
+        let max_forward_jump = u64::from(MAX_FORWARD_TIME_JUMP_SECS) * u64::from(clock_rate.get());
         let max_forward_jump = i32::try_from(max_forward_jump)
             .map_err(|_| format_err!(
                 "clock_rate={} rejected because max forward jump of {} sec exceeds i32::MAX",
@@ -41,7 +40,7 @@ impl Timeline {
         if !(0..self.max_forward_jump).contains(&delta) {
             bail!("Timestamp jumped {} ({:.03} sec) from {} to {}; \
                    policy is to allow 0..{} sec only",
-                  delta, (delta as f64) / f64::from(self.clock_rate), self.timestamp,
+                  delta, (delta as f64) / f64::from(self.clock_rate.get()), self.timestamp,
                   timestamp, MAX_FORWARD_TIME_JUMP_SECS);
         }
         self.timestamp = timestamp.timestamp;

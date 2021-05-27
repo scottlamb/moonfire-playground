@@ -47,9 +47,9 @@ fn process(stream_id: usize, all_stats: &mut [Option<StreamStats>], ts: moonfire
     if stats.pkts > 1 {
         let local_elapsed = (stats.latest_instant - stats.first_instant).as_secs_f64();
         let rtp_elapsed = (ts.timestamp() - stats.first.timestamp()) as f64
-            / ts.clock_rate() as f64;
+            / ts.clock_rate().get() as f64;
         if stats.tot_duration > 0 {
-            let dur_elapsed = stats.tot_duration as f64 / ts.clock_rate() as f64;
+            let dur_elapsed = stats.tot_duration as f64 / ts.clock_rate().get() as f64;
             info!("stream {}: delta {:6}, rtp-local={:6.3}s rtp-dur={:6.3}s",
                   stream_id,
                   ts.timestamp() - stats.latest.timestamp(),
