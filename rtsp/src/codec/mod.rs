@@ -11,10 +11,11 @@ use failure::{Error, bail};
 use pretty_hex::PrettyHex;
 use crate::client::rtp;
 
-pub mod aac;
-pub mod h264;
-pub mod onvif;
-pub mod simple_audio;
+pub(crate) mod aac;
+pub(crate) mod h264;
+pub(crate) mod onvif;
+pub(crate) mod simple_audio;
+pub(crate) mod g723;
 
 pub enum CodecItem {
     VideoFrame(VideoFrame),
@@ -304,6 +305,7 @@ impl bytes::Buf for VideoFrame {
 pub(crate) enum Demuxer {
     Aac(aac::Demuxer),
     SimpleAudio(simple_audio::Demuxer),
+    G723(g723::Demuxer),
     H264(h264::Demuxer),
     Onvif(onvif::Demuxer),
 }
@@ -317,6 +319,9 @@ impl Demuxer {
         format_specific_params: Option<&str>)
     -> Result<Self, Error> {
         use onvif::CompressionType;
+
+        // RTP Payload Format Media Types
+        // https://www.iana.org/assignments/rtp-parameters/rtp-parameters.xhtml#rtp-parameters-2
         match (media, encoding_name) {
             ("video", "h264") => Ok(
                 Demuxer::H264(h264::Demuxer::new(clock_rate, format_specific_params)?)
@@ -324,11 +329,29 @@ impl Demuxer {
             ("audio", "mpeg4-generic") => Ok(
                 Demuxer::Aac(aac::Demuxer::new(clock_rate, channels, format_specific_params)?)
             ),
-            ("audio", "l8") | ("audio", "pcma") | ("audio", "pcmu") => Ok(
-                Demuxer::SimpleAudio(simple_audio::Demuxer::new(clock_rate, 0))
+            ("audio", "g726-16") => Ok(
+                Demuxer::SimpleAudio(simple_audio::Demuxer::new(clock_rate, 2))
+            ),
+            ("audio", "g726-24") => Ok(
+                Demuxer::SimpleAudio(simple_audio::Demuxer::new(clock_rate, 3))
+            ),
+            ("audio", "dvi4") | ("audio", "g726-32") => Ok(
+                Demuxer::SimpleAudio(simple_audio::Demuxer::new(clock_rate, 4))
+            ),
+            ("audio", "g726-40") => Ok(
+                Demuxer::SimpleAudio(simple_audio::Demuxer::new(clock_rate, 5))
+            ),
+            ("audio", "pcma") | ("audio", "pcmu") | ("audio", "u8") | ("audio", "g722") => Ok(
+                Demuxer::SimpleAudio(simple_audio::Demuxer::new(clock_rate, 8))
             ),
             ("audio", "l16") => Ok(
-                Demuxer::SimpleAudio(simple_audio::Demuxer::new(clock_rate, 1))
+                Demuxer::SimpleAudio(simple_audio::Demuxer::new(clock_rate, 16))
+            ),
+            // Dahua cameras when configured with G723 send packets with a
+            // non-standard encoding-name "G723.1" and length 40, which doesn't
+            // make sense. Don't try to depacketize these.
+            ("audio", "g723") => Ok(
+                Demuxer::G723(g723::Demuxer::new(clock_rate)?)
             ),
             ("application", "vnd.onvif.metadata") => Ok(
                 Demuxer::Onvif(onvif::Demuxer::new(CompressionType::Uncompressed))
@@ -352,6 +375,7 @@ impl Demuxer {
     pub(crate) fn parameters(&self) -> Option<&Parameters> {
         match self {
             Demuxer::Aac(d) => d.parameters(),
+            Demuxer::G723(d) => d.parameters(),
             Demuxer::H264(d) => d.parameters(),
             Demuxer::Onvif(d) => d.parameters(),
             Demuxer::SimpleAudio(d) => d.parameters(),
@@ -361,6 +385,7 @@ impl Demuxer {
     pub(crate) fn push(&mut self, input: rtp::Packet) -> Result<(), Error> {
         match self {
             Demuxer::Aac(d) => d.push(input),
+            Demuxer::G723(d) => d.push(input),
             Demuxer::H264(d) => d.push(input),
             Demuxer::Onvif(d) => d.push(input),
             Demuxer::SimpleAudio(d) => d.push(input),
@@ -370,6 +395,7 @@ impl Demuxer {
     pub(crate) fn pull(&mut self) -> Result<Option<CodecItem>, Error> {
         match self {
             Demuxer::Aac(d) => d.pull(),
+            Demuxer::G723(d) => d.pull(),
             Demuxer::H264(d) => d.pull(),
             Demuxer::Onvif(d) => d.pull(),
             Demuxer::SimpleAudio(d) => d.pull(),

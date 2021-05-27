@@ -13,6 +13,8 @@ pub struct Packet {
     pub timestamp: crate::Timestamp,
     pub sequence_number: u16,
     pub mark: bool,
+
+    /// Guaranteed to be less than u16::MAX bytes.
     pub payload: Bytes,
 }
 
