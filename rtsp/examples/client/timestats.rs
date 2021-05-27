@@ -98,28 +98,52 @@ pub(crate) async fn run(
         .initial_timestamp_mode(opts.initial_timestamp_mode)
     ).await?.demuxed()?;
 
-    // Read RTP data.
     tokio::pin!(session);
     tokio::pin!(stop);
 
+    // Special-case the first GOP because the camera might buffer it for quick catch-up.
+    let mut idr_count = 0;
+    let mut first_idr = None;
     loop {
         tokio::select! {
             item = session.next() => {
                 match item.ok_or_else(|| format_err!("EOF"))?? {
-                    CodecItem::AudioFrame(f) => process(
-                        f.stream_id,
-                        &mut all_stats,
-                        f.timestamp,
-                        f.ctx.msg_received(),
-                        f.frame_length.get(),
-                    ),
-                    CodecItem::VideoFrame(f) => process(
-                        f.stream_id,
-                        &mut all_stats,
-                        f.timestamp,
-                        f.ctx.msg_received(),
-                        duration_from_fps[f.stream_id],
-                    ),
+                    CodecItem::AudioFrame(f) => {
+                        if idr_count < 2 {
+                            continue;
+                        }
+                        process(
+                            f.stream_id,
+                            &mut all_stats,
+                            f.timestamp,
+                            f.ctx.msg_received(),
+                            f.frame_length.get(),
+                        );
+                    },
+                    CodecItem::VideoFrame(f) => {
+                        if idr_count < 2 && !f.is_random_access_point {
+                            continue;
+                        } else if idr_count < 2 {
+                            idr_count += 1;
+                            match idr_count {
+                                1 => first_idr = Some((f.ctx.msg_received(), f.timestamp)),
+                                2 => {
+                                    let (first_local, first_rtp) = first_idr.unwrap();
+                                    println!("first GOP, rtp delta {:.3} sec in {:.3} sec",
+                                             f.timestamp.elapsed_secs() - first_rtp.elapsed_secs(),
+                                             (f.ctx.msg_received() - first_local).as_secs_f64());
+                                },
+                                _ => unreachable!(),
+                            };
+                        }
+                        process(
+                            f.stream_id,
+                            &mut all_stats,
+                            f.timestamp,
+                            f.ctx.msg_received(),
+                            duration_from_fps[f.stream_id],
+                        )
+                    },
                     _ => {},
                 };
             },
