@@ -137,7 +137,8 @@ impl std::fmt::Debug for NtpTimestamp {
 pub struct Context {
     conn_local_addr: std::net::SocketAddr,
     conn_peer_addr: std::net::SocketAddr,
-    conn_established: time::Timespec,
+    conn_established_wall: time::Timespec,
+    conn_established: std::time::Instant,
 
     /// The byte position within the input stream. The bottom 32 bits can be
     /// compared to the TCP sequence number.
@@ -146,7 +147,18 @@ pub struct Context {
     /// Time when the application parsed the message. Caveat: this may not
     /// closely match the time on a packet capture if the application is
     /// overloaded (or `CLOCK_REALTIME` jumps).
-    msg_received: time::Timespec,
+    msg_received_wall: time::Timespec,
+    msg_received: std::time::Instant,
+}
+
+impl Context {
+    pub fn conn_established(&self) -> std::time::Instant {
+        self.conn_established
+    }
+
+    pub fn msg_received(&self) -> std::time::Instant {
+        self.msg_received
+    }
 }
 
 impl Debug for Context {
@@ -156,9 +168,9 @@ impl Debug for Context {
         write!(f, "[{}(me)->{}@{} pos={}@{}]",
                &self.conn_local_addr,
                &self.conn_peer_addr,
-               time::at(self.conn_established).strftime("%FT%T").or_else(|_| Err(std::fmt::Error))?,
+               time::at(self.conn_established_wall).strftime("%FT%T").or_else(|_| Err(std::fmt::Error))?,
                self.msg_pos,
-               time::at(self.msg_received).strftime("%FT%T").or_else(|_| Err(std::fmt::Error))?)
+               time::at(self.msg_received_wall).strftime("%FT%T").or_else(|_| Err(std::fmt::Error))?)
     }
 }
 
@@ -243,7 +255,8 @@ impl tokio_util::codec::Decoder for Codec {
                 }
             },
         };
-        self.ctx.msg_received = time::get_time();
+        self.ctx.msg_received_wall = time::get_time();
+        self.ctx.msg_received = std::time::Instant::now();
         let msg = ReceivedMessage {
             ctx: self.ctx,
             msg,
@@ -261,13 +274,5 @@ impl tokio_util::codec::Encoder<rtsp_types::Message<bytes::Bytes>> for Codec {
         item.write(&mut w).expect("bytes Writer is infallible");
         *dst = w.into_inner();
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
     }
 }

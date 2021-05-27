@@ -154,7 +154,7 @@ impl AudioParameters {
 
 /// An audio frame, which consists of one or more samples.
 pub struct AudioFrame {
-    ctx: crate::Context,
+    pub ctx: crate::Context,
     pub stream_id: usize,
     pub timestamp: crate::Timestamp,
     pub frame_length: NonZeroU32,

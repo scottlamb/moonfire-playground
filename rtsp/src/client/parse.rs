@@ -615,11 +615,14 @@ mod tests {
         assert_eq!(p.streams[0].media, "video");
         assert_eq!(p.streams[0].encoding_name, "h265");
         assert_eq!(p.streams[0].rtp_payload_type, 98);
-        assert!(p.streams[1].parameters().is_none());
+        assert!(p.streams[0].parameters().is_none());
         assert_eq!(p.streams[1].media, "audio");
         assert_eq!(p.streams[1].encoding_name, "pcma");
         assert_eq!(p.streams[1].rtp_payload_type, 8);
-        assert!(p.streams[1].parameters().is_none());
+        match p.streams[1].parameters().unwrap() {
+            Parameters::Audio(_) => {},
+            _ => panic!(),
+        };
     }
 
     #[test]
@@ -856,7 +859,10 @@ mod tests {
         assert_eq!(p.streams[1].rtp_payload_type, 0);
         assert_eq!(p.streams[1].clock_rate, 8_000);
         assert_eq!(p.streams[1].channels, NonZeroU16::new(1));
-        assert!(p.streams[1].parameters().is_none());
+        match p.streams[1].parameters().unwrap() {
+            Parameters::Audio(_) => {},
+            _ => panic!(),
+        };
     }
 
     /// [GW Security GW4089IP](https://github.com/scottlamb/moonfire-nvr/wiki/Cameras:-GW-Security#gw4089ip),
@@ -894,7 +900,10 @@ mod tests {
         assert_eq!(p.streams[1].rtp_payload_type, 8);
         assert_eq!(p.streams[1].clock_rate, 8_000);
         assert_eq!(p.streams[1].channels, NonZeroU16::new(1));
-        assert!(p.streams[1].parameters().is_none());
+        match p.streams[1].parameters().unwrap() {
+            Parameters::Audio(_) => {},
+            _ => panic!(),
+        };
 
         // SETUP.
         let setup_response = response(include_bytes!("testdata/gw_main_setup_video.txt"));

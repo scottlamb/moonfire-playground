@@ -27,20 +27,23 @@ pub const KEEPALIVE_DURATION: std::time::Duration = std::time::Duration::from_se
 /// allowing multiple streams to be played in sync.
 #[derive(Copy, Clone, Debug)]
 pub enum InitialTimestampMode {
-    /// Default policy: currently `Require` when playing multiple streams, `Ignore` otherwise.
+    /// Default policy: currently `Require` when playing multiple streams,
+    /// `Ignore` otherwise.
     Default,
 
-    /// Require the `rtptime` parameter be present and use it to set NPT. Use when accurate
-    /// multi-stream NPT is important.
+    /// Require the `rtptime` parameter be present and use it to set NPT. Use
+    /// when accurate multi-stream NPT is important.
     Require,
 
-    /// Ignore the `rtptime` parameter and assume the first received packet for each
-    /// stream is at NPT 0. Use with cameras that are known to set `rtptime` incorrectly.
+    /// Ignore the `rtptime` parameter and assume the first received packet for
+    /// each stream is at NPT 0. Use with cameras that are known to set
+    /// `rtptime` incorrectly.
     Ignore,
 
-    /// Use the `rtptime` parameter if present for all streams being played; otherwise assume the
-    /// first received packet for each stream is at NPT 0.
-    UseIfAllPresent,
+    /// Use the `rtptime` parameter when playing multiple streams if it's
+    /// specified for all of them; otherwise assume the first received packet
+    /// for each stream is at NPT 0.
+    Permissive,
 }
 
 impl Default for InitialTimestampMode {
@@ -49,14 +52,14 @@ impl Default for InitialTimestampMode {
     }
 }
 
-impl ToString for InitialTimestampMode {
-    fn to_string(&self) -> String {
+impl std::fmt::Display for InitialTimestampMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            InitialTimestampMode::Default => "default",
-            InitialTimestampMode::Require => "require",
-            InitialTimestampMode::Ignore => "ignore",
-            InitialTimestampMode::UseIfAllPresent => "use-if-all-present",
-        }.to_owned()
+            InitialTimestampMode::Default => f.pad("default"),
+            InitialTimestampMode::Require => f.pad("require"),
+            InitialTimestampMode::Ignore => f.pad("ignore"),
+            InitialTimestampMode::Permissive => f.pad("permissive"),
+        }
     }
 }
 
@@ -68,7 +71,7 @@ impl std::str::FromStr for InitialTimestampMode {
             "default" => InitialTimestampMode::Default,
             "require" => InitialTimestampMode::Require,
             "ignore" => InitialTimestampMode::Ignore,
-            "use-if-all-present" => InitialTimestampMode::UseIfAllPresent,
+            "permissive" => InitialTimestampMode::Permissive,
             _ => bail!("Initial timestamp mode {:?} not understood", s),
         })
     }
@@ -427,15 +430,18 @@ impl RtspConnection {
         let host = url.host_str().ok_or_else(|| format_err!("Must specify host in rtsp url {}", &url))?;
         let port = url.port().unwrap_or(554);
         let stream = tokio::net::TcpStream::connect((host, port)).await?;
-        let conn_established = time::get_time();
+        let conn_established_wall = time::get_time();
+        let conn_established = std::time::Instant::now();
         let conn_local_addr = stream.local_addr()?;
         let conn_peer_addr = stream.peer_addr()?;
         let stream = Framed::new(stream, crate::Codec {
             ctx: crate::Context {
+                conn_established_wall,
                 conn_established,
                 conn_local_addr,
                 conn_peer_addr,
                 msg_pos: 0,
+                msg_received_wall: conn_established_wall,
                 msg_received: conn_established,
             },
         });
@@ -621,7 +627,9 @@ impl Session<Described> {
                             }
                             initial_rtptime
                         },
-                        InitialTimestampMode::UseIfAllPresent if all_have_time => initial_rtptime,
+                        InitialTimestampMode::Permissive if setup_streams > 1 && all_have_time => {
+                            initial_rtptime
+                        },
                         _ => None,
                     };
                     s.state = StreamState::Playing {
