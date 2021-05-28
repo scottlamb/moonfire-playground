@@ -18,7 +18,7 @@ pub enum CompressionType {
 }
 
 #[derive(Debug)]
-pub(crate) struct Demuxer {
+pub(crate) struct Depacketizer {
     parameters: super::Parameters,
     state: State,
     high_water_size: usize,
@@ -38,9 +38,9 @@ struct InProgress {
     data: BytesMut,
 }
 
-impl Demuxer {
+impl Depacketizer {
     pub(super) fn new(compression_type: CompressionType) -> Self {
-        Demuxer {
+        Depacketizer {
             parameters: super::Parameters::Message(super::MessageParameters(compression_type)),
             state: State::Idle,
             high_water_size: 0,

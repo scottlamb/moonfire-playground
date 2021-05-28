@@ -146,7 +146,7 @@ pub struct Stream {
     /// Number of audio channels, if applicable (`media` is `audio`) and known.
     pub channels: Option<NonZeroU16>,
 
-    demuxer: Result<crate::codec::Demuxer, Error>,
+    depacketizer: Result<crate::codec::Depacketizer, Error>,
 
     /// The specified control URL.
     /// This is needed with multiple streams to send `SETUP` requests and
@@ -170,7 +170,7 @@ impl Stream {
     /// Returns `None` on unknown codecs, bad parameters, or if parameters aren't specified
     /// via SDP. Some codecs allow parameters to be specified in-band instead.
     pub fn parameters(&self) -> Option<&crate::codec::Parameters> {
-        self.demuxer.as_ref().ok().and_then(|d| d.parameters())
+        self.depacketizer.as_ref().ok().and_then(|d| d.parameters())
     }
 }
 
@@ -534,7 +534,7 @@ impl Session<Playing> {
     pub fn demuxed(mut self) -> Result<impl futures::Stream<Item = Result<CodecItem, Error>>, Error> {
         for s in &mut self.state.presentation.streams {
             if matches!(s.state, StreamState::Playing{..}) {
-                if let Err(ref mut e) = s.demuxer {
+                if let Err(ref mut e) = s.depacketizer {
                     return Err(std::mem::replace(e, format_err!("(placeholder)")));
                 }
             }
@@ -548,12 +548,12 @@ impl Session<Playing> {
                     PacketItem::RtpPacket(p) => {
                         let self_ = self_.as_mut().project();
                         let state = self_.state.project();
-                        let demuxer = match &mut state.presentation.streams[p.stream_id].demuxer {
+                        let depacketizer = match &mut state.presentation.streams[p.stream_id].depacketizer {
                             Ok(d) => d,
-                            Err(_) => unreachable!("demuxer was Ok"),
+                            Err(_) => unreachable!("depacketizer was Ok"),
                         };
-                        demuxer.push(p)?;
-                        while let Some(demuxed) = demuxer.pull()? {
+                        depacketizer.push(p)?;
+                        while let Some(demuxed) = depacketizer.pull()? {
                             yield demuxed;
                         }
                     },

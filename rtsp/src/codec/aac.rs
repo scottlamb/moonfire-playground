@@ -1,4 +1,4 @@
-//! AAC (Advanced Audio Codec) decoding.
+//! AAC (Advanced Audio Codec) depacketization.
 //! There are many intertwined standards; see the following references:
 //! *   [RFC 3640](https://datatracker.ietf.org/doc/html/rfc3640): RTP Payload
 //!     for Transport of MPEG-4 Elementary Streams.
@@ -361,12 +361,12 @@ fn parse_format_specific_params(
 }
 
 #[derive(Debug)]
-pub(crate) struct Demuxer {
+pub(crate) struct Depacketizer {
     parameters: super::Parameters,
 
     /// This is in parameters but duplicated here to avoid destructuring.
     frame_length: NonZeroU16,
-    state: DemuxerState,
+    state: DepacketizerState,
 }
 
 #[derive(Debug)]
@@ -404,14 +404,14 @@ struct Fragment {
 }
 
 #[derive(Debug)]
-enum DemuxerState {
+enum DepacketizerState {
     Idle,
     Aggregated(Aggregate),
     Fragmented(Fragment),
     Ready(super::AudioFrame),
 }
 
-impl Demuxer {
+impl Depacketizer {
     pub(super) fn new(
         clock_rate: u32,
         channels: Option<NonZeroU16>,
@@ -432,7 +432,7 @@ impl Demuxer {
         Ok(Self {
             parameters: super::Parameters::Audio(parameters),
             frame_length,
-            state: DemuxerState::Idle,
+            state: DepacketizerState::Idle,
         })
     }
 
@@ -457,7 +457,7 @@ impl Demuxer {
             bail!("packet too short for au-headers");
         }
         match &mut self.state {
-            DemuxerState::Fragmented(ref mut frag) => {
+            DepacketizerState::Fragmented(ref mut frag) => {
                 if au_headers_count != 1 {
                     bail!("Got {}-AU packet while fragment in progress", au_headers_count);
                 }
@@ -483,7 +483,7 @@ impl Demuxer {
                         }
                         frag.buf.extend_from_slice(data);
                         println!("au {}: len-{}, fragmented", &pkt.timestamp, size);
-                        self.state = DemuxerState::Ready(super::AudioFrame {
+                        self.state = DepacketizerState::Ready(super::AudioFrame {
                             ctx: pkt.rtsp_ctx,
                             frame_length: NonZeroU32::from(self.frame_length),
                             stream_id: pkt.stream_id,
@@ -494,12 +494,12 @@ impl Demuxer {
                     std::cmp::Ordering::Greater => bail!("too much data in fragment"),
                 }
             },
-            DemuxerState::Aggregated(_) => panic!("push when already in state aggregated"),
-            DemuxerState::Idle => {
+            DepacketizerState::Aggregated(_) => panic!("push when already in state aggregated"),
+            DepacketizerState::Idle => {
                 if au_headers_count == 0 {
                     bail!("aggregate with no headers");
                 }
-                self.state = DemuxerState::Aggregated(Aggregate {
+                self.state = DepacketizerState::Aggregated(Aggregate {
                     ctx: pkt.rtsp_ctx,
                     stream_id: pkt.stream_id,
                     timestamp: pkt.timestamp,
@@ -510,22 +510,22 @@ impl Demuxer {
                     mark: pkt.mark,
                 });
             },
-            DemuxerState::Ready(..) => panic!("push when in state ready"),
+            DepacketizerState::Ready(..) => panic!("push when in state ready"),
         }
         Ok(())
     }
 
     pub(super) fn pull(&mut self) -> Result<Option<super::CodecItem>, Error> {
-        match std::mem::replace(&mut self.state, DemuxerState::Idle) {
-            s @ DemuxerState::Idle | s @ DemuxerState::Fragmented(..) => {
+        match std::mem::replace(&mut self.state, DepacketizerState::Idle) {
+            s @ DepacketizerState::Idle | s @ DepacketizerState::Fragmented(..) => {
                 self.state = s;
                 Ok(None)
             },
-            DemuxerState::Ready(f) => {
-                self.state = DemuxerState::Idle;
+            DepacketizerState::Ready(f) => {
+                self.state = DepacketizerState::Idle;
                 Ok(Some(CodecItem::AudioFrame(f)))
             }
-            DemuxerState::Aggregated(mut agg) => {
+            DepacketizerState::Aggregated(mut agg) => {
                 let i = usize::from(agg.frame_i);
                 let au_header = u16::from_be_bytes([agg.buf[i << 1], agg.buf[(i << 1) + 1]]);
                 let size = usize::from(au_header >> 3);
@@ -546,7 +546,7 @@ impl Demuxer {
                     }
                     let mut buf = BytesMut::with_capacity(size);
                     buf.extend_from_slice(&agg.buf[agg.data_off..]);
-                    self.state = DemuxerState::Fragmented(Fragment {
+                    self.state = DepacketizerState::Fragmented(Fragment {
                         rtp_timestamp: agg.timestamp.timestamp as u16,
                         size: size as u16,
                         buf,
@@ -569,7 +569,7 @@ impl Demuxer {
                 agg.data_off += size;
                 agg.frame_i += 1;
                 if agg.frame_i < agg.frame_count {
-                    self.state = DemuxerState::Aggregated(agg);
+                    self.state = DepacketizerState::Aggregated(agg);
                 }
                 Ok(Some(CodecItem::AudioFrame(frame)))
             },

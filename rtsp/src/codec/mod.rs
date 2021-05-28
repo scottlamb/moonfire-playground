@@ -302,15 +302,15 @@ impl bytes::Buf for VideoFrame {
 }
 
 #[derive(Debug)]
-pub(crate) enum Demuxer {
-    Aac(aac::Demuxer),
-    SimpleAudio(simple_audio::Demuxer),
-    G723(g723::Demuxer),
-    H264(h264::Demuxer),
-    Onvif(onvif::Demuxer),
+pub(crate) enum Depacketizer {
+    Aac(aac::Depacketizer),
+    SimpleAudio(simple_audio::Depacketizer),
+    G723(g723::Depacketizer),
+    H264(h264::Depacketizer),
+    Onvif(onvif::Depacketizer),
 }
 
-impl Demuxer {
+impl Depacketizer {
     pub(crate) fn new(
         media: &str,
         encoding_name: &str,
@@ -324,81 +324,81 @@ impl Demuxer {
         // https://www.iana.org/assignments/rtp-parameters/rtp-parameters.xhtml#rtp-parameters-2
         match (media, encoding_name) {
             ("video", "h264") => Ok(
-                Demuxer::H264(h264::Demuxer::new(clock_rate, format_specific_params)?)
+                Depacketizer::H264(h264::Depacketizer::new(clock_rate, format_specific_params)?)
             ),
             ("audio", "mpeg4-generic") => Ok(
-                Demuxer::Aac(aac::Demuxer::new(clock_rate, channels, format_specific_params)?)
+                Depacketizer::Aac(aac::Depacketizer::new(clock_rate, channels, format_specific_params)?)
             ),
             ("audio", "g726-16") => Ok(
-                Demuxer::SimpleAudio(simple_audio::Demuxer::new(clock_rate, 2))
+                Depacketizer::SimpleAudio(simple_audio::Depacketizer::new(clock_rate, 2))
             ),
             ("audio", "g726-24") => Ok(
-                Demuxer::SimpleAudio(simple_audio::Demuxer::new(clock_rate, 3))
+                Depacketizer::SimpleAudio(simple_audio::Depacketizer::new(clock_rate, 3))
             ),
             ("audio", "dvi4") | ("audio", "g726-32") => Ok(
-                Demuxer::SimpleAudio(simple_audio::Demuxer::new(clock_rate, 4))
+                Depacketizer::SimpleAudio(simple_audio::Depacketizer::new(clock_rate, 4))
             ),
             ("audio", "g726-40") => Ok(
-                Demuxer::SimpleAudio(simple_audio::Demuxer::new(clock_rate, 5))
+                Depacketizer::SimpleAudio(simple_audio::Depacketizer::new(clock_rate, 5))
             ),
             ("audio", "pcma") | ("audio", "pcmu") | ("audio", "u8") | ("audio", "g722") => Ok(
-                Demuxer::SimpleAudio(simple_audio::Demuxer::new(clock_rate, 8))
+                Depacketizer::SimpleAudio(simple_audio::Depacketizer::new(clock_rate, 8))
             ),
             ("audio", "l16") => Ok(
-                Demuxer::SimpleAudio(simple_audio::Demuxer::new(clock_rate, 16))
+                Depacketizer::SimpleAudio(simple_audio::Depacketizer::new(clock_rate, 16))
             ),
             // Dahua cameras when configured with G723 send packets with a
             // non-standard encoding-name "G723.1" and length 40, which doesn't
             // make sense. Don't try to depacketize these.
             ("audio", "g723") => Ok(
-                Demuxer::G723(g723::Demuxer::new(clock_rate)?)
+                Depacketizer::G723(g723::Depacketizer::new(clock_rate)?)
             ),
             ("application", "vnd.onvif.metadata") => Ok(
-                Demuxer::Onvif(onvif::Demuxer::new(CompressionType::Uncompressed))
+                Depacketizer::Onvif(onvif::Depacketizer::new(CompressionType::Uncompressed))
             ),
             ("application", "vnd.onvif.metadata.gzip") => Ok(
-                Demuxer::Onvif(onvif::Demuxer::new(CompressionType::GzipCompressed))
+                Depacketizer::Onvif(onvif::Depacketizer::new(CompressionType::GzipCompressed))
             ),
             ("application", "vnd.onvif.metadata.exi.onvif") => Ok(
-                Demuxer::Onvif(onvif::Demuxer::new(CompressionType::ExiDefault))
+                Depacketizer::Onvif(onvif::Depacketizer::new(CompressionType::ExiDefault))
             ),
             ("application", "vnd.onvif.metadata.exi.ext") => Ok(
-                Demuxer::Onvif(onvif::Demuxer::new(CompressionType::ExiInBand))
+                Depacketizer::Onvif(onvif::Depacketizer::new(CompressionType::ExiInBand))
             ),
             (_, _) => {
-                log::info!("no demuxer for media/encoding_name {}/{}", media, encoding_name);
-                bail!("no demuxer for media/encoding_name {}/{}", media, encoding_name);
+                log::info!("no depacketizer for media/encoding_name {}/{}", media, encoding_name);
+                bail!("no depacketizer for media/encoding_name {}/{}", media, encoding_name);
             },
         }
     }
 
     pub(crate) fn parameters(&self) -> Option<&Parameters> {
         match self {
-            Demuxer::Aac(d) => d.parameters(),
-            Demuxer::G723(d) => d.parameters(),
-            Demuxer::H264(d) => d.parameters(),
-            Demuxer::Onvif(d) => d.parameters(),
-            Demuxer::SimpleAudio(d) => d.parameters(),
+            Depacketizer::Aac(d) => d.parameters(),
+            Depacketizer::G723(d) => d.parameters(),
+            Depacketizer::H264(d) => d.parameters(),
+            Depacketizer::Onvif(d) => d.parameters(),
+            Depacketizer::SimpleAudio(d) => d.parameters(),
         }
     }
 
     pub(crate) fn push(&mut self, input: rtp::Packet) -> Result<(), Error> {
         match self {
-            Demuxer::Aac(d) => d.push(input),
-            Demuxer::G723(d) => d.push(input),
-            Demuxer::H264(d) => d.push(input),
-            Demuxer::Onvif(d) => d.push(input),
-            Demuxer::SimpleAudio(d) => d.push(input),
+            Depacketizer::Aac(d) => d.push(input),
+            Depacketizer::G723(d) => d.push(input),
+            Depacketizer::H264(d) => d.push(input),
+            Depacketizer::Onvif(d) => d.push(input),
+            Depacketizer::SimpleAudio(d) => d.push(input),
         }
     }
 
     pub(crate) fn pull(&mut self) -> Result<Option<CodecItem>, Error> {
         match self {
-            Demuxer::Aac(d) => d.pull(),
-            Demuxer::G723(d) => d.pull(),
-            Demuxer::H264(d) => d.pull(),
-            Demuxer::Onvif(d) => d.pull(),
-            Demuxer::SimpleAudio(d) => d.pull(),
+            Depacketizer::Aac(d) => d.pull(),
+            Depacketizer::G723(d) => d.pull(),
+            Depacketizer::H264(d) => d.pull(),
+            Depacketizer::Onvif(d) => d.pull(),
+            Depacketizer::SimpleAudio(d) => d.pull(),
         }
     }
 }

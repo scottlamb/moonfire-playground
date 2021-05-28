@@ -7,13 +7,13 @@ use failure::{bail, Error};
 use pretty_hex::PrettyHex;
 
 #[derive(Debug)]
-pub(crate) struct Demuxer {
+pub(crate) struct Depacketizer {
     parameters: super::Parameters,
     pending: Option<super::AudioFrame>,
 }
 
-impl Demuxer {
-    /// Creates a new Demuxer.
+impl Depacketizer {
+    /// Creates a new Depacketizer.
     pub(super) fn new(clock_rate: u32) -> Result<Self, Error> {
         if clock_rate != 8_000 {
             bail!("Expected clock rate of 8000 for G.723, got {}", clock_rate);

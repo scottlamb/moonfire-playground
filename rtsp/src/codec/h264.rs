@@ -9,7 +9,7 @@ use log::debug;
 
 use crate::client::rtp::Packet;
 
-/// A [super::Demuxer] implementation which finds access unit boundaries
+/// A [super::Depacketizer] implementation which finds access unit boundaries
 /// and produces unfragmented NAL units as specified in [RFC
 /// 6184](https://tools.ietf.org/html/rfc6184).
 ///
@@ -19,8 +19,8 @@ use crate::client::rtp::Packet;
 /// 
 /// Currently expects that the stream starts at an access unit boundary and has no lost packets.
 #[derive(Debug)]
-pub(crate) struct Demuxer {
-    input_state: DemuxerInputState,
+pub(crate) struct Depacketizer {
+    input_state: DepacketizerInputState,
     pending: Option<AccessUnit>,
     parameters: InternalParameters,
 
@@ -50,7 +50,7 @@ struct PreMark {
 }
 
 #[derive(Debug)]
-enum DemuxerInputState {
+enum DepacketizerInputState {
     /// Not yet processing an access unit.
     New,
 
@@ -62,7 +62,7 @@ enum DemuxerInputState {
     PostMark { timestamp: crate::Timestamp },
 }
 
-impl Demuxer {
+impl Depacketizer {
     pub(super) fn new(clock_rate: u32, format_specific_params: Option<&str>) -> Result<Self, Error> {
         if clock_rate != 90_000 {
             bail!("H.264 clock rate must always be 90000");
@@ -70,9 +70,9 @@ impl Demuxer {
 
         // TODO: the spec doesn't require out-of-band parameters, so we shouldn't either.
         let format_specific_params = format_specific_params
-            .ok_or_else(|| format_err!("H.264 demuxer expects out-of-band parameters"))?;
-        Ok(Demuxer {
-            input_state: DemuxerInputState::New,
+            .ok_or_else(|| format_err!("H.264 depacketizer expects out-of-band parameters"))?;
+        Ok(Depacketizer {
+            input_state: DepacketizerInputState::New,
             pending: None,
             frag_high_water: 0,
             parameters: InternalParameters::parse_format_specific_params(format_specific_params)?,
@@ -94,14 +94,14 @@ impl Demuxer {
         // but it doesn't seem to match my use case. I want to iterate the NALs,
         // not re-encode them in Annex B format.
         let seq = pkt.sequence_number;
-        let mut premark = match std::mem::replace(&mut self.input_state, DemuxerInputState::New) {
-            DemuxerInputState::New => {
+        let mut premark = match std::mem::replace(&mut self.input_state, DepacketizerInputState::New) {
+            DepacketizerInputState::New => {
                 PreMark {
                     access_unit: AccessUnit::start(pkt.rtsp_ctx, pkt.timestamp, pkt.stream_id),
                     frag_buf: None,
                 }
             },
-            DemuxerInputState::PreMark(mut premark) => {
+            DepacketizerInputState::PreMark(mut premark) => {
                 if premark.access_unit.timestamp.timestamp != pkt.timestamp.timestamp {
                     if premark.frag_buf.is_some() {
                         bail!("Timestamp changed from {} to {} in the middle of a fragmented NAL at seq={:04x} {:#?}", premark.access_unit.timestamp, pkt.timestamp, seq, &pkt.rtsp_ctx);
@@ -110,7 +110,7 @@ impl Demuxer {
                 }
                 premark
             },
-            DemuxerInputState::PostMark { timestamp: state_ts } => {
+            DepacketizerInputState::PostMark { timestamp: state_ts } => {
                 if state_ts.timestamp == pkt.timestamp.timestamp {
                     bail!("Received packet with timestamp {} after marked packet with same timestamp at seq={:04x} {:#?}", pkt.timestamp, seq, &pkt.rtsp_ctx);
                 }
@@ -203,9 +203,9 @@ impl Demuxer {
         }
         self.input_state = if pkt.mark {
             self.pending = Some(premark.access_unit);
-            DemuxerInputState::PostMark { timestamp: pkt.timestamp }
+            DepacketizerInputState::PostMark { timestamp: pkt.timestamp }
         } else {
-            DemuxerInputState::PreMark(premark)
+            DepacketizerInputState::PreMark(premark)
         };
         Ok(())
     }

@@ -305,14 +305,14 @@ fn parse_media(
     }
 
     let encoding_name = encoding_name.to_ascii_lowercase();
-    let demuxer = crate::codec::Demuxer::new(&media, &encoding_name, clock_rate, channels, fmtp);
+    let depacketizer = crate::codec::Depacketizer::new(&media, &encoding_name, clock_rate, channels, fmtp);
 
     Ok(Stream {
         media,
         encoding_name,
         clock_rate,
         rtp_payload_type,
-        demuxer,
+        depacketizer,
         control,
         alt_control,
         channels,

@@ -10,14 +10,14 @@ use failure::format_err;
 use super::CodecItem;
 
 #[derive(Debug)]
-pub(crate) struct Demuxer {
+pub(crate) struct Depacketizer {
     parameters: super::Parameters,
     pending: Option<super::AudioFrame>,
     bits_per_sample: u32,
 }
 
-impl Demuxer {
-    /// Creates a new Demuxer.
+impl Depacketizer {
+    /// Creates a new Depacketizer.
     pub(super) fn new(clock_rate: u32, bits_per_sample: u32) -> Self {
         Self {
             parameters: super::Parameters::Audio(super::AudioParameters {
