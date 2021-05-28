@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fmt::Debug, num::{NonZeroU16, NonZeroU8}, pin::Pin};
+use std::{borrow::Cow, fmt::Debug, num::NonZeroU16, pin::Pin};
 
 use async_stream::try_stream;
 use bytes::Bytes;
@@ -7,6 +7,7 @@ use futures::{SinkExt, StreamExt};
 use log::{debug, trace, warn};
 use pin_project::pin_project;
 use sdp::session_description::SessionDescription;
+use self::channel_mapping::*;
 use self::timeline::Timeline;
 use tokio::pin;
 use tokio_util::codec::Framed;
@@ -14,6 +15,7 @@ use url::Url;
 
 use crate::{Context, codec::CodecItem};
 
+mod channel_mapping;
 mod parse;
 mod timeline;
 pub mod rtcp;
@@ -212,96 +214,6 @@ pub struct Credentials {
     pub password: String,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum ChannelType {
-    Rtp,
-    Rtcp,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-struct ChannelMapping {
-    stream_i: usize,
-    channel_type: ChannelType,
-}
-
-/// Mapping of the 256 possible RTSP interleaved channels to stream indices and
-/// RTP/RTCP. Assumptions:
-/// *   We only need to support 255 possible streams in a presentation. If
-///     there are more than 128, we couldn't actually stream them all at once
-///     anyway with one RTP and one RTCP channel per stream.
-/// *   We'll always assign even channels numbers as RTP and their odd
-///     successors as RTCP for the same stream. This seems reasonable given
-///     that there is no clear way to assign a single channel in the RTSP spec.
-///     [RFC 2326 section 10.12](https://tools.ietf.org/html/rfc2326#section-10.12)
-///     says that `interleaved=n` also assigns channel `n+1`, and it's ambiguous
-///     what `interleaved=n-m` does when `m > n+1` (section 10.12 suggests it
-///     assigns only `n` and `m`; section 12.39 the suggests full range `[n,
-///     m]`) or when `n==m`. We'll get into trouble if an RTSP server insists on
-///     specifying an odd `n`, but that just seems obstinate.
-/// These assumptions let us keep the full mapping with little space and an
-/// efficient lookup operation.
-#[derive(Default)]
-struct ChannelMappings(smallvec::SmallVec<[Option<NonZeroU8>; 16]>);
-
-impl ChannelMappings {
-    /// Returns the next unassigned even channel id, or errors.
-    fn next_unassigned(&self) -> Result<u8, Error> {
-        if let Some(i) = self.0.iter().position(Option::is_none) {
-            return Ok((i as u8) << 1);
-        }
-        if self.0.len() < 128 {
-            return Ok((self.0.len() as u8) << 1);
-        }
-        bail!("all RTSP channels have been assigned");
-    }
-
-    /// Assigns an even channel id (to RTP) and its odd successor (to RTCP) or errors.
-    fn assign(&mut self, channel_id: u8, stream_i: usize) -> Result<(), Error> {
-        if (channel_id & 1) != 0 {
-            bail!("Can't assign odd channel id {}", channel_id);
-        }
-        if stream_i >= 255 {
-            bail!("Can't assign channel to stream id {} because it's >= 255", stream_i);
-        }
-        let i = usize::from(channel_id >> 1);
-        if i >= self.0.len() {
-            self.0.resize(i + 1, None);
-        }
-        let c = &mut self.0[i];
-        if let Some(c) = c {
-            bail!("Channel id {} is already assigned to stream {}; won't reassign to stream {}",
-                  channel_id, c.get() - 1, channel_id);
-        }
-        *c = Some(NonZeroU8::new((stream_i + 1) as u8).expect("[0, 255) + 1 is non-zero"));
-        Ok(())
-    }
-
-    /// Looks up a channel id's mapping.
-    fn lookup(&self, channel_id: u8) -> Option<ChannelMapping> {
-        let i = usize::from(channel_id >> 1);
-        if i >= self.0.len() {
-            return None;
-        }
-        self.0[i].map(|c| ChannelMapping {
-            stream_i: usize::from(c.get() - 1),
-            channel_type: match (channel_id & 1) != 0 {
-                false => ChannelType::Rtp,
-                true => ChannelType::Rtcp,
-            }
-        })
-    }
-}
-
-impl Debug for ChannelMappings {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_map()
-            .entries(self.0.iter().enumerate().filter_map(|(i, v)| v.map(|v| (
-                format!("{}-{}", i << 1, (i << 1) + 1),
-                v.get() - 1
-            ))))
-            .finish()
-    }
-}
 
 /// Marker trait for the state of a [Session].
 /// This doesn't closely match [RFC 2326
@@ -768,39 +680,4 @@ impl Session<Playing> {
     }
 
     pub fn streams(&self) -> &[Stream] { &self.state.presentation.streams }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::client::{ChannelMapping, ChannelType};
-
-    #[test]
-    fn channel_mappings() {
-        let mut mappings = super::ChannelMappings::default();
-        assert_eq!(mappings.next_unassigned().unwrap(), 0);
-        assert_eq!(mappings.lookup(0), None);
-        mappings.assign(0, 42).unwrap();
-        mappings.assign(0, 43).unwrap_err();
-        mappings.assign(1, 43).unwrap_err();
-        assert_eq!(mappings.lookup(0), Some(ChannelMapping {
-            stream_i: 42,
-            channel_type: ChannelType::Rtp,
-        }));
-        assert_eq!(mappings.lookup(1), Some(ChannelMapping {
-            stream_i: 42,
-            channel_type: ChannelType::Rtcp,
-        }));
-        assert_eq!(mappings.next_unassigned().unwrap(), 2);
-        mappings.assign(9, 26).unwrap_err();
-        mappings.assign(8, 26).unwrap();
-        assert_eq!(mappings.lookup(8), Some(ChannelMapping {
-            stream_i: 26,
-            channel_type: ChannelType::Rtp,
-        }));
-        assert_eq!(mappings.lookup(9), Some(ChannelMapping {
-            stream_i: 26,
-            channel_type: ChannelType::Rtcp,
-        }));
-        assert_eq!(mappings.next_unassigned().unwrap(), 2);
-    }
 }
