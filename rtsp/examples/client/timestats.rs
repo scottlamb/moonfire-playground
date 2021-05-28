@@ -8,7 +8,7 @@ use std::convert::TryFrom;
 #[derive(structopt::StructOpt)]
 pub(crate) struct Opts {
     #[structopt(default_value, long)]
-    initial_timestamp_mode: moonfire_rtsp::client::InitialTimestampMode,
+    initial_timestamp: moonfire_rtsp::client::InitialTimestampPolicy,
 
     #[structopt(long)]
     streams: Option<Vec<usize>>,
@@ -94,8 +94,8 @@ pub(crate) async fn run(
         session.setup(i).await?;
     }
     let session = session.play(
-        moonfire_rtsp::client::PlayQuirks::new()
-        .initial_timestamp_mode(opts.initial_timestamp_mode)
+        moonfire_rtsp::client::PlayQuirks::default()
+        .initial_timestamp(opts.initial_timestamp)
     ).await?.demuxed()?;
 
     tokio::pin!(session);
@@ -126,10 +126,11 @@ pub(crate) async fn run(
                         } else if idr_count < 2 {
                             idr_count += 1;
                             match idr_count {
+                                0 => info!("leading non-idr frame"),
                                 1 => first_idr = Some((f.ctx.msg_received(), f.timestamp)),
                                 2 => {
                                     let (first_local, first_rtp) = first_idr.unwrap();
-                                    println!("first GOP, rtp delta {:.3} sec in {:.3} sec",
+                                    info!("first GOP, rtp delta {:.3} sec in {:.3} sec",
                                              f.timestamp.elapsed_secs() - first_rtp.elapsed_secs(),
                                              (f.ctx.msg_received() - first_local).as_secs_f64());
                                 },

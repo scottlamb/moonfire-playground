@@ -29,7 +29,7 @@ use url::Url;
 #[derive(structopt::StructOpt)]
 pub(crate) struct Opts {
     #[structopt(default_value, long)]
-    initial_timestamp_mode: moonfire_rtsp::client::InitialTimestampMode,
+    initial_timestamp: moonfire_rtsp::client::InitialTimestampPolicy,
 
     #[structopt(long)]
     no_video: bool,
@@ -502,8 +502,8 @@ pub(crate) async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Cre
         None
     };
     let session = session.play(
-        moonfire_rtsp::client::PlayQuirks::new()
-            .initial_timestamp_mode(opts.initial_timestamp_mode)
+        moonfire_rtsp::client::PlayQuirks::default()
+            .initial_timestamp(opts.initial_timestamp)
     ).await?.demuxed()?;
 
     // Read RTP data.

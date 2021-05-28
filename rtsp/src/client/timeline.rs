@@ -48,7 +48,7 @@ impl Timeline {
     }
 
     /// Places `rtp_timestamp` on the timeline without advancing the timeline
-    /// backward or applying time jump policy. Will set the NPT epoch if unset.
+    /// or applying time jump policy. Will set the NPT epoch if unset.
     ///
     /// This is useful for RTP timestamps in RTCP packets. They commonly refer
     /// to time slightly before the most timestamp of the matching RTP stream.

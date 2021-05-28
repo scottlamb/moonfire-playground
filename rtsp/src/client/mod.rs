@@ -22,11 +22,11 @@ pub mod rtp;
 /// Duration between keepalive RTSP requests during [Playing] state.
 pub const KEEPALIVE_DURATION: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Describes how to handle the `rtptime` parameter normally seem in the `RTP-Info header.
+/// Policy for handling the `rtptime` parameter normally seem in the `RTP-Info header.
 /// This parameter is used to map each stream's RTP timestamp to NPT ("normal play time"),
 /// allowing multiple streams to be played in sync.
 #[derive(Copy, Clone, Debug)]
-pub enum InitialTimestampMode {
+pub enum InitialTimestampPolicy {
     /// Default policy: currently `Require` when playing multiple streams,
     /// `Ignore` otherwise.
     Default,
@@ -46,50 +46,58 @@ pub enum InitialTimestampMode {
     Permissive,
 }
 
-impl Default for InitialTimestampMode {
+impl Default for InitialTimestampPolicy {
     fn default() -> Self {
-        InitialTimestampMode::Default
+        InitialTimestampPolicy::Default
     }
 }
 
-impl std::fmt::Display for InitialTimestampMode {
+impl std::fmt::Display for InitialTimestampPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            InitialTimestampMode::Default => f.pad("default"),
-            InitialTimestampMode::Require => f.pad("require"),
-            InitialTimestampMode::Ignore => f.pad("ignore"),
-            InitialTimestampMode::Permissive => f.pad("permissive"),
+            InitialTimestampPolicy::Default => f.pad("default"),
+            InitialTimestampPolicy::Require => f.pad("require"),
+            InitialTimestampPolicy::Ignore => f.pad("ignore"),
+            InitialTimestampPolicy::Permissive => f.pad("permissive"),
         }
     }
 }
 
-impl std::str::FromStr for InitialTimestampMode {
+impl std::str::FromStr for InitialTimestampPolicy {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s {
-            "default" => InitialTimestampMode::Default,
-            "require" => InitialTimestampMode::Require,
-            "ignore" => InitialTimestampMode::Ignore,
-            "permissive" => InitialTimestampMode::Permissive,
+            "default" => InitialTimestampPolicy::Default,
+            "require" => InitialTimestampPolicy::Require,
+            "ignore" => InitialTimestampPolicy::Ignore,
+            "permissive" => InitialTimestampPolicy::Permissive,
             _ => bail!("Initial timestamp mode {:?} not understood", s),
         })
     }
 }
 
 /// Adjustments to make on `PLAY` for non-compliant server implementations.
+#[derive(Default)]
 pub struct PlayQuirks {
-    initial_timestamp_mode: InitialTimestampMode,
+    initial_timestamp: InitialTimestampPolicy,
+    ignore_zero_seq: bool,
 }
 
 impl PlayQuirks {
-    pub fn new() -> Self {
-        Self { initial_timestamp_mode: InitialTimestampMode::Default }
+    pub fn initial_timestamp(self, initial_timestamp: InitialTimestampPolicy) -> Self {
+        Self {
+            initial_timestamp,
+            ..self
+        }
     }
 
-    pub fn initial_timestamp_mode(self, initial_timestamp_mode: InitialTimestampMode) -> Self {
+    /// If the `RTP-Time` specifies `seq=0`, ignore it. Some cameras set this value then start
+    /// the stream with something dramatically different. (Eg the Hikvision DS-2CD2032-I on its
+    /// metadata stream; the other streams are fine.)
+    pub fn ignore_zero_seq(self, ignore_zero_seq: bool) -> Self {
         Self {
-            initial_timestamp_mode,
+            ignore_zero_seq,
             ..self
         }
     }
@@ -546,22 +554,29 @@ impl Session<Described> {
                     ssrc,
                     ..
                 }) => {
-                    let initial_rtptime = match quirks.initial_timestamp_mode {
-                        InitialTimestampMode::Require
-                        | InitialTimestampMode::Default if setup_streams > 1 => {
+                    let initial_rtptime = match quirks.initial_timestamp {
+                        InitialTimestampPolicy::Require
+                        | InitialTimestampPolicy::Default if setup_streams > 1 => {
                             if initial_rtptime.is_none() {
                                 bail!(
                                     "Expected rtptime on PLAY with mode {:?}, missing on stream \
                                      {} ({:?}). Consider setting initial timestamp mode \
                                      use-if-all-present.",
-                                    quirks.initial_timestamp_mode, i, &s.control);
+                                    quirks.initial_timestamp, i, &s.control);
                             }
                             initial_rtptime
                         },
-                        InitialTimestampMode::Permissive if setup_streams > 1 && all_have_time => {
+                        InitialTimestampPolicy::Permissive if setup_streams > 1 && all_have_time => {
                             initial_rtptime
                         },
                         _ => None,
+                    };
+                    let initial_seq = match initial_seq {
+                        Some(0) if quirks.ignore_zero_seq => {
+                            log::info!("Ignoring seq=0 on stream {}", i);
+                            None
+                        },
+                        o => o,
                     };
                     s.state = StreamState::Playing {
                         timeline: Timeline::new(initial_rtptime, s.clock_rate)?,
