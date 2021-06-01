@@ -12,6 +12,15 @@ pub struct Packet {
     pub stream_id: usize,
     pub timestamp: crate::Timestamp,
     pub sequence_number: u16,
+
+    /// Number of skipped sequence numbers since the last packet.
+    ///
+    /// In the case of the first packet on the stream, this may also report loss
+    /// packets since the `RTP-Info` header's `seq` value. However, currently
+    /// that header is not required to be present and may be ignored (see
+    /// [`crate::client::PlayPolicy::ignore_zero_seq()`].)
+    pub loss: u16,
+
     pub mark: bool,
 
     /// Guaranteed to be less than u16::MAX bytes.
@@ -27,32 +36,16 @@ pub struct SenderReport {
     pub ntp_timestamp: crate::NtpTimestamp,
 }
 
-/// Maximum number of skipped initial sequence numbers.
-/// At least with a [Dahua
-/// IPC-HDW5442T-ZE](https://www.dahuasecurity.com/products/All-Products/Network-Cameras/WizMind-Series/5-Series/4MP/IPC-HDW5442T-ZE)
-/// running `V2.800.15OG004.0.T, Build Date: 2020-11-23`, the first packet's sequence number is sometimes higher than the
-/// that specified in the `PLAY` response's `RTP-Info: ...;seq=...` field. Perhaps this happens if the next IDR frame happens just
-/// as the `PLAY` command is finishing.
-const MAX_INITIAL_SEQ_SKIP: u16 = 128;
-
-/// Ensures packets have the correct SSRC, are in sequence with (almost) no gaps, and have reasonable timestamps.
+/// RTP demarshaller which ensures packets have the correct SSRC and monotonically increasing SEQ.
 ///
-/// Exception: it allows a gap in the sequence at the beginning, as explained at [`MAX_INITIAL_SEQ_SKIP`].
-///
-/// This is the simplest and easiest-to-debug policy. It may suffice for
-/// connecting to an IP camera via RTP/AVP/TCP. We'll have to see if cameras
-/// skip sequence numbers in any other cases, such as when the TCP window fills
-/// and/or the camera is overloaded.
-///
-/// It definitely wouldn't work well when using UDP or when using a proxy which
-/// may be using UDP for the backend:
-/// *   while TCP handles lost, duplicated, and out-of-order packets for us, UDP doesn't.
-/// *   there might be packets still flowing to that address from a previous RTSP session.
+/// This reports packet loss (via [Packet::loss]) but doesn't prohibit it, except for losses
+/// of more than `i16::MAX` which would be indistinguishable from non-monotonic sequence numbers.
+/// Servers sometimes drop packets internally even when sending data via TCP.
 ///
 /// At least [one camera](https://github.com/scottlamb/moonfire-nvr/wiki/Cameras:-Reolink#reolink-rlc-410-hardware-version-ipc_3816m)
-/// sometimes still sends data from old RTSP sessions over new ones. This seems
-/// like a serious bug, but we could work around it by discarding those packets
-/// by SSRC rather than erroring out.
+/// sometimes sends data from old RTSP sessions over new ones. This seems like a
+/// serious bug, and currently `StrictSequenceChecker` will error in this case,
+/// although it'd be possible to discard the incorrect SSRC instead.
 ///
 /// [RFC 3550 section 8.2](https://tools.ietf.org/html/rfc3550#section-8.2) says that SSRC
 /// can change mid-session with a RTCP BYE message. This currently isn't handled. I'm
@@ -61,7 +54,6 @@ const MAX_INITIAL_SEQ_SKIP: u16 = 128;
 pub(super) struct StrictSequenceChecker {
     ssrc: Option<u32>,
     next_seq: Option<u16>,
-    max_seq_skip: u16,
 }
 
 impl StrictSequenceChecker {
@@ -69,7 +61,6 @@ impl StrictSequenceChecker {
         Self {
             ssrc,
             next_seq,
-            max_seq_skip: MAX_INITIAL_SEQ_SKIP,
         }
     }
 
@@ -98,10 +89,8 @@ impl StrictSequenceChecker {
                                                    stream_id, sequence_number, &rtsp_ctx)).into()),
         };
         let ssrc = reader.ssrc();
-        if (self.ssrc != None && self.ssrc != Some(ssrc))
-           || matches!(self.next_seq, Some(s)
-                       if sequence_number.wrapping_sub(s) > self.max_seq_skip)
-        {
+        let loss = sequence_number.wrapping_sub(self.next_seq.unwrap_or(sequence_number));
+        if matches!(self.ssrc, Some(s) if s != ssrc) || loss > 0x80_00 {
             bail!("Expected ssrc={:08x?} seq={:04x?} got ssrc={:08x} seq={:04x} ts={} at {:#?}",
                   self.ssrc, self.next_seq, ssrc, sequence_number, timestamp, &rtsp_ctx);
         }
@@ -114,12 +103,12 @@ impl StrictSequenceChecker {
         data.truncate(payload_range.end);
         data.advance(payload_range.start);
         self.next_seq = Some(sequence_number.wrapping_add(1));
-        self.max_seq_skip = 0;
         return Ok(Packet {
             stream_id,
             rtsp_ctx,
             timestamp,
             sequence_number,
+            loss,
             mark,
             payload: data,
         })

@@ -52,6 +52,7 @@ impl Depacketizer {
         }
         self.pending = Some(super::AudioFrame {
             ctx: pkt.rtsp_ctx,
+            loss: pkt.loss,
             stream_id: pkt.stream_id,
             timestamp: pkt.timestamp,
             frame_length: NonZeroU32::new(240).unwrap(),

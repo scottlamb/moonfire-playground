@@ -100,7 +100,10 @@ struct TrakTracker {
 }
 
 impl TrakTracker {
-    fn add_sample(&mut self, pos: u32, size: u32, timestamp: moonfire_rtsp::Timestamp) -> Result<(), Error> {
+    fn add_sample(&mut self, pos: u32, size: u32, timestamp: moonfire_rtsp::Timestamp, loss: u16) -> Result<(), Error> {
+        if self.samples > 0 && loss > 0 {
+            bail!("Lost {} RTP packets mid-stream", loss);
+        }
         self.samples += 1;
         if self.next_pos != Some(pos) {
             self.chunks.push((self.samples, pos));
@@ -447,7 +450,7 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
             bail!("parameters change unimplemented. new parameters: {:#?}", p);
         }
         let size = u32::try_from(frame.remaining())?;
-        self.video_trak.add_sample(self.mdat_pos, size, frame.timestamp)?;
+        self.video_trak.add_sample(self.mdat_pos, size, frame.timestamp, frame.loss)?;
         self.mdat_pos = self.mdat_pos.checked_add(size).ok_or_else(|| format_err!("mdat_pos overflow"))?;
         if frame.is_random_access_point {
             self.video_sync_sample_nums.push(u32::try_from(self.video_trak.samples)?);
@@ -459,7 +462,7 @@ impl<W: AsyncWrite + AsyncSeek + Send + Unpin> Mp4Writer<W> {
     async fn audio(&mut self, mut frame: moonfire_rtsp::codec::AudioFrame) -> Result<(), failure::Error> {
         println!("{}: {}-byte audio frame", &frame.timestamp, frame.data.remaining());
         let size = u32::try_from(frame.data.remaining())?;
-        self.audio_trak.add_sample(self.mdat_pos, size, frame.timestamp)?;
+        self.audio_trak.add_sample(self.mdat_pos, size, frame.timestamp, frame.loss)?;
         self.mdat_pos = self.mdat_pos.checked_add(size).ok_or_else(|| format_err!("mdat_pos overflow"))?;
         write_all_buf(&mut self.inner, &mut frame.data).await?;
         Ok(())

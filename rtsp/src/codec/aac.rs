@@ -373,6 +373,17 @@ pub(crate) struct Depacketizer {
 struct Aggregate {
     ctx: crate::Context,
 
+    /// RTP packets lost before the next frame in this aggregate. Includes old
+    /// loss that caused a previous fragment to be too short.
+    /// This should be 0 when `frame_i > 0`.
+    loss: u16,
+
+    /// True iff there was loss immediately before the packet that started this
+    /// aggregate. The distinction between old and recent loss is relevant
+    /// because only the latter should be capable of causing following fragments
+    /// to be too short.
+    loss_since_mark: bool,
+
     stream_id: usize,
 
     /// The RTP-level timestamp; frame `i` is at timestamp `timestamp + frame_length*i`.
@@ -399,13 +410,24 @@ struct Aggregate {
 #[derive(Debug)]
 struct Fragment {
     rtp_timestamp: u16,
+
+    /// Number of RTP packets lost before between the previous output AudioFrame
+    /// and now.
+    loss: u16,
+
+    /// True iff packets have been lost since the last mark. If so, this
+    /// fragment may be incomplete.
+    loss_since_mark: bool,
+
     size: u16,
     buf: BytesMut,
 }
 
 #[derive(Debug)]
 enum DepacketizerState {
-    Idle,
+    Idle {
+        prev_loss: u16,
+    },
     Aggregated(Aggregate),
     Fragmented(Fragment),
     Ready(super::AudioFrame),
@@ -432,7 +454,9 @@ impl Depacketizer {
         Ok(Self {
             parameters: super::Parameters::Audio(parameters),
             frame_length,
-            state: DepacketizerState::Idle,
+            state: DepacketizerState::Idle {
+                prev_loss: 0,
+            },
         })
     }
 
@@ -441,6 +465,13 @@ impl Depacketizer {
     }
 
     pub(super) fn push(&mut self, mut pkt: Packet) -> Result<(), Error> {
+        if pkt.loss > 0 && matches!(self.state, DepacketizerState::Fragmented(_)) {
+            log::debug!("Discarding fragmented AAC frame due to loss of {} RTP packets.", pkt.loss);
+            self.state = DepacketizerState::Idle {
+                prev_loss: 0,
+            };
+        }
+
         // Read the AU headers.
         if pkt.payload.len() < 2 {
             bail!("packet too short for au-header-length");
@@ -474,6 +505,12 @@ impl Depacketizer {
                 match (frag.buf.len() + data.len()).cmp(&size) {
                     std::cmp::Ordering::Less => {
                         if pkt.mark {
+                            if frag.loss > 0 {
+                                self.state = DepacketizerState::Idle {
+                                    prev_loss: frag.loss,
+                                };
+                                return Ok(());
+                            }
                             bail!("frag marked complete when {}+{}<{}", frag.buf.len(), data.len(), size);
                         }
                     },
@@ -485,6 +522,7 @@ impl Depacketizer {
                         println!("au {}: len-{}, fragmented", &pkt.timestamp, size);
                         self.state = DepacketizerState::Ready(super::AudioFrame {
                             ctx: pkt.rtsp_ctx,
+                            loss: frag.loss,
                             frame_length: NonZeroU32::from(self.frame_length),
                             stream_id: pkt.stream_id,
                             timestamp: pkt.timestamp,
@@ -495,12 +533,14 @@ impl Depacketizer {
                 }
             },
             DepacketizerState::Aggregated(_) => panic!("push when already in state aggregated"),
-            DepacketizerState::Idle => {
+            DepacketizerState::Idle { prev_loss } => {
                 if au_headers_count == 0 {
                     bail!("aggregate with no headers");
                 }
                 self.state = DepacketizerState::Aggregated(Aggregate {
                     ctx: pkt.rtsp_ctx,
+                    loss: *prev_loss + pkt.loss,
+                    loss_since_mark: pkt.loss > 0,
                     stream_id: pkt.stream_id,
                     timestamp: pkt.timestamp,
                     buf: pkt.payload,
@@ -516,13 +556,13 @@ impl Depacketizer {
     }
 
     pub(super) fn pull(&mut self) -> Result<Option<super::CodecItem>, Error> {
-        match std::mem::replace(&mut self.state, DepacketizerState::Idle) {
-            s @ DepacketizerState::Idle | s @ DepacketizerState::Fragmented(..) => {
+        match std::mem::replace(&mut self.state, DepacketizerState::Idle { prev_loss: 0 }) {
+            s @ DepacketizerState::Idle{..} | s @ DepacketizerState::Fragmented(..) => {
                 self.state = s;
                 Ok(None)
             },
             DepacketizerState::Ready(f) => {
-                self.state = DepacketizerState::Idle;
+                self.state = DepacketizerState::Idle { prev_loss: 0 };
                 Ok(Some(CodecItem::AudioFrame(f)))
             }
             DepacketizerState::Aggregated(mut agg) => {
@@ -548,6 +588,8 @@ impl Depacketizer {
                     buf.extend_from_slice(&agg.buf[agg.data_off..]);
                     self.state = DepacketizerState::Fragmented(Fragment {
                         rtp_timestamp: agg.timestamp.timestamp as u16,
+                        loss: agg.loss,
+                        loss_since_mark: agg.loss_since_mark,
                         size: size as u16,
                         buf,
                     });
@@ -558,6 +600,7 @@ impl Depacketizer {
                 }
                 let frame = super::AudioFrame {
                     ctx: agg.ctx,
+                    loss: agg.loss,
                     stream_id: agg.stream_id,
                     frame_length: NonZeroU32::from(self.frame_length),
 
@@ -566,6 +609,7 @@ impl Depacketizer {
                         u32::from(agg.frame_i) * u32::from(self.frame_length.get()))?,
                     data: agg.buf.slice(agg.data_off..agg.data_off+size),
                 };
+                agg.loss = 0;
                 agg.data_off += size;
                 agg.frame_i += 1;
                 if agg.frame_i < agg.frame_count {

@@ -37,6 +37,9 @@ struct AccessUnit {
     new_sps: Option<Bytes>,
     new_pps: Option<Bytes>,
 
+    /// RTP packets lost as this access unit was starting.
+    loss: u16,
+
     /// Currently we expect only a single slice NAL.
     picture: Option<Bytes>,
 }
@@ -54,12 +57,20 @@ enum DepacketizerInputState {
     /// Not yet processing an access unit.
     New,
 
+    Loss {
+        timestamp: crate::Timestamp,
+        pkts: u16,
+    },
+
     /// Currently processing an access unit.
     /// This will be flushed after a marked packet or when receiving a later timestamp.
     PreMark(PreMark),
 
     /// Finished processing the given packet. It's an error to receive the same timestamp again.
-    PostMark { timestamp: crate::Timestamp },
+    PostMark {
+        timestamp: crate::Timestamp,
+        loss: u16,
+    },
 }
 
 impl Depacketizer {
@@ -97,29 +108,68 @@ impl Depacketizer {
         let mut premark = match std::mem::replace(&mut self.input_state, DepacketizerInputState::New) {
             DepacketizerInputState::New => {
                 PreMark {
-                    access_unit: AccessUnit::start(pkt.rtsp_ctx, pkt.timestamp, pkt.stream_id),
+                    access_unit: AccessUnit::start(&pkt),
                     frag_buf: None,
                 }
             },
             DepacketizerInputState::PreMark(mut premark) => {
-                if premark.access_unit.timestamp.timestamp != pkt.timestamp.timestamp {
-                    if premark.frag_buf.is_some() {
-                        bail!("Timestamp changed from {} to {} in the middle of a fragmented NAL at seq={:04x} {:#?}", premark.access_unit.timestamp, pkt.timestamp, seq, &pkt.rtsp_ctx);
+                if pkt.loss > 0 {
+                    if premark.access_unit.timestamp.timestamp == pkt.timestamp.timestamp {
+                        // Loss within this access unit. Ignore until mark or new timestamp.
+                        self.input_state = if pkt.mark {
+                            DepacketizerInputState::PostMark {
+                                timestamp: pkt.timestamp,
+                                loss: pkt.loss,
+                            }
+                        } else {
+                            DepacketizerInputState::Loss {
+                                timestamp: pkt.timestamp,
+                                pkts: pkt.loss,
+                            }
+                        };
+                        return Ok(());
                     }
-                    premark.access_unit.end_ctx = pkt.rtsp_ctx;
-                    self.pending = Some(std::mem::replace(&mut premark.access_unit, AccessUnit::start(pkt.rtsp_ctx, pkt.timestamp, pkt.stream_id)));
+                    // A suffix of a previous access unit was lost; discard it.
+                    // A prefix of the new one may have been lost; try parsing.
+                    PreMark {
+                        access_unit: AccessUnit::start(&pkt),
+                        frag_buf: None,
+                    }
+                } else {
+                    if premark.access_unit.timestamp.timestamp != pkt.timestamp.timestamp {
+                        if premark.frag_buf.is_some() {
+                            bail!("Timestamp changed from {} to {} in the middle of a fragmented NAL at seq={:04x} {:#?}", premark.access_unit.timestamp, pkt.timestamp, seq, &pkt.rtsp_ctx);
+                        }
+                        premark.access_unit.end_ctx = pkt.rtsp_ctx;
+                        self.pending = Some(std::mem::replace(&mut premark.access_unit, AccessUnit::start(&pkt)));
+                    }
+                    premark
                 }
-                premark
             },
-            DepacketizerInputState::PostMark { timestamp: state_ts } => {
+            DepacketizerInputState::PostMark { timestamp: state_ts, loss } => {
                 if state_ts.timestamp == pkt.timestamp.timestamp {
                     bail!("Received packet with timestamp {} after marked packet with same timestamp at seq={:04x} {:#?}", pkt.timestamp, seq, &pkt.rtsp_ctx);
                 }
+                let mut access_unit = AccessUnit::start(&pkt);
+                access_unit.loss += loss;
                 PreMark {
-                    access_unit: AccessUnit::start(pkt.rtsp_ctx, pkt.timestamp, pkt.stream_id),
+                    access_unit,
                     frag_buf: None,
                 }
-            }
+            },
+            DepacketizerInputState::Loss { timestamp, mut pkts } => {
+                if pkt.timestamp.timestamp == timestamp.timestamp {
+                    pkts += pkt.loss;
+                    self.input_state = DepacketizerInputState::Loss { timestamp, pkts };
+                    return Ok(());
+                }
+                let mut access_unit = AccessUnit::start(&pkt);
+                access_unit.loss += pkts;
+                PreMark {
+                    access_unit,
+                    frag_buf: None,
+                }
+            },
         };
 
         let mut data = pkt.payload;
@@ -197,7 +247,17 @@ impl Depacketizer {
                             premark.frag_buf = Some(frag_buf);
                         }
                     },
-                    (false, None) => bail!("FU-A with start bit unset while no frag in progress at {:04x} {:#?}", seq, &pkt.rtsp_ctx),
+                    (false, None) => {
+                        if pkt.loss > 0 {
+                            self.input_state = DepacketizerInputState::Loss {
+                                timestamp: pkt.timestamp,
+                                pkts: pkt.loss,
+                            };
+                            return Ok(());
+                        }
+                        bail!("FU-A with start bit unset while no frag in progress at {:04x} {:#?}",
+                              seq, &pkt.rtsp_ctx);
+                    },
                 }
             },
             _ => bail!("bad nal header {:0x} at seq {:04x} {:#?}", nal_header, seq, &pkt.rtsp_ctx),
@@ -205,7 +265,7 @@ impl Depacketizer {
         self.input_state = if pkt.mark {
             premark.access_unit.end_ctx = pkt.rtsp_ctx;
             self.pending = Some(premark.access_unit);
-            DepacketizerInputState::PostMark { timestamp: pkt.timestamp }
+            DepacketizerInputState::PostMark { timestamp: pkt.timestamp, loss: 0 }
         } else {
             DepacketizerInputState::PreMark(premark)
         };
@@ -233,6 +293,7 @@ impl Depacketizer {
         Ok(Some(super::CodecItem::VideoFrame(super::VideoFrame {
             start_ctx: pending.start_ctx,
             end_ctx: pending.end_ctx,
+            loss: pending.loss,
             new_parameters,
             timestamp: pending.timestamp,
             stream_id: pending.stream_id,
@@ -246,12 +307,13 @@ impl Depacketizer {
 }
 
 impl AccessUnit {
-    fn start(ctx: crate::Context, timestamp: crate::Timestamp, stream_id: usize) -> Self {
+    fn start(pkt: &crate::client::rtp::Packet) -> Self {
         AccessUnit {
-            start_ctx: ctx,
-            end_ctx: ctx,
-            timestamp,
-            stream_id,
+            start_ctx: pkt.rtsp_ctx,
+            end_ctx: pkt.rtsp_ctx,
+            timestamp: pkt.timestamp,
+            stream_id: pkt.stream_id,
+            loss: pkt.loss,
             new_sps: None,
             new_pps: None,
             picture: None,

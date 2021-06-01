@@ -36,6 +36,7 @@ struct InProgress {
     ctx: crate::Context,
     timestamp: crate::Timestamp,
     data: BytesMut,
+    loss: u16,
 }
 
 impl Depacketizer {
@@ -52,6 +53,13 @@ impl Depacketizer {
     }
 
     pub(super) fn push(&mut self, pkt: crate::client::rtp::Packet) -> Result<(), failure::Error> {
+        if pkt.loss > 0 {
+            if let State::InProgress(in_progress) = &self.state {
+                log::debug!("Discarding {}-byte message prefix due to loss of {} RTP packets",
+                            in_progress.data.len(), pkt.loss);
+                self.state = State::Idle;
+            }
+        }
         let mut in_progress = match std::mem::replace(&mut self.state, State::Idle) {
             State::InProgress(in_progress) => {
                 if in_progress.timestamp.timestamp != pkt.timestamp.timestamp {
@@ -64,6 +72,7 @@ impl Depacketizer {
             State::Idle => {
                 if pkt.mark { // fast-path: avoid copy.
                     self.state = State::Ready(super::MessageFrame {
+                        loss: pkt.loss,
                         ctx: pkt.rtsp_ctx,
                         timestamp: pkt.timestamp,
                         data: pkt.payload,
@@ -71,6 +80,7 @@ impl Depacketizer {
                     return Ok(());
                 }
                 InProgress {
+                    loss: pkt.loss,
                     ctx: pkt.rtsp_ctx,
                     timestamp: pkt.timestamp,
                     data: BytesMut::with_capacity(self.high_water_size),
@@ -86,6 +96,7 @@ impl Depacketizer {
                 ctx: in_progress.ctx,
                 timestamp: in_progress.timestamp,
                 data: in_progress.data.freeze(),
+                loss: in_progress.loss,
             });
         } else {
             self.state = State::InProgress(in_progress);

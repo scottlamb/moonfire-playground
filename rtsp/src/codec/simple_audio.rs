@@ -53,6 +53,7 @@ impl Depacketizer {
             .ok_or_else(|| format_err!("invalid length {} for payload of {}-bit audio samples",
                                        pkt.payload.len(), self.bits_per_sample))?;
         self.pending = Some(super::AudioFrame {
+            loss: pkt.loss,
             ctx: pkt.rtsp_ctx,
             stream_id: pkt.stream_id,
             timestamp: pkt.timestamp,

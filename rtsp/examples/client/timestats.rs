@@ -1,6 +1,6 @@
 use failure::{Error, format_err};
 use futures::StreamExt;
-use log::info;
+use log::{info, warn};
 use moonfire_rtsp::codec::{CodecItem, Parameters};
 use rtsp_types::Url;
 use std::convert::TryFrom;
@@ -26,7 +26,10 @@ struct StreamStats {
 }
 
 fn process(stream_id: usize, all_stats: &mut [Option<StreamStats>], ts: moonfire_rtsp::Timestamp,
-           when: std::time::Instant, duration: u32) {
+           when: std::time::Instant, duration: u32, loss: u16) {
+    if loss > 0 {
+        warn!("Lost {} RTP packets on stream {}", loss, stream_id);
+    }
     let stats = &mut all_stats[stream_id];
     let stats = match stats {
         None => {
@@ -119,6 +122,7 @@ pub(crate) async fn run(
                             f.timestamp,
                             f.ctx.msg_received(),
                             f.frame_length.get(),
+                            f.loss,
                         );
                     },
                     CodecItem::VideoFrame(f) => {
@@ -145,6 +149,7 @@ pub(crate) async fn run(
                             f.timestamp,
                             ctx.msg_received(),
                             duration_from_fps[f.stream_id],
+                            f.loss,
                         )
                     },
                     _ => {},

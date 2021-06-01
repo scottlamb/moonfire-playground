@@ -159,6 +159,11 @@ pub struct AudioFrame {
     pub timestamp: crate::Timestamp,
     pub frame_length: NonZeroU32,
 
+    /// Number of lost RTP packets before this audio frame. See [crate::client::rtp::Packet::loss].
+    /// Note that if loss occurs during a fragmented frame, more than this number of packets' worth
+    /// of data may be skipped.
+    pub loss: u16,
+
     // TODO: expose bytes or Buf (for zero-copy)?
     pub data: Bytes,
 }
@@ -168,6 +173,7 @@ impl std::fmt::Debug for AudioFrame {
         f.debug_struct("AudioFrame")
          .field("stream_id", &self.stream_id)
          .field("ctx", &self.ctx)
+         .field("loss", &self.loss)
          .field("timestamp", &self.timestamp)
          .field("frame_length", &self.frame_length)
          .field("data", &self.data.hex_dump()) 
@@ -196,6 +202,10 @@ pub struct MessageFrame {
     pub ctx: crate::Context,
     pub timestamp: crate::Timestamp,
 
+    /// Number of lost RTP packets before this message frame. See [crate::client::rtp::Packet::loss].
+    /// If this is non-zero, a prefix of the message may be missing.
+    pub loss: u16,
+
     // TODO: expose bytes or Buf (for zero-copy)?
     pub data: Bytes,
 }
@@ -204,6 +214,7 @@ impl std::fmt::Debug for MessageFrame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AudioFrame")
          .field("ctx", &self.ctx)
+         .field("loss", &self.loss)
          .field("timestamp", &self.timestamp)
          .field("data", &self.data.hex_dump())
          .finish()
@@ -217,6 +228,11 @@ impl std::fmt::Debug for MessageFrame {
 /// picture, or approximated via the frame rate.
 pub struct VideoFrame {
     pub new_parameters: Option<VideoParameters>,
+
+    /// Number of lost RTP packets before this video frame. See [crate::client::rtp::Packet::loss].
+    /// Note that if loss occurs during a fragmented frame, more than this number of packets' worth
+    /// of data may be skipped.
+    pub loss: u16,
 
     // A pair of contexts: for the start and for the end.
     // Having both can be useful to measure the total time elapsed while receiving the frame.
@@ -266,6 +282,7 @@ impl std::fmt::Debug for VideoFrame {
          .field("timestamp", &self.timestamp)
          .field("start_ctx", &self.start_ctx)
          .field("end_ctx", &self.end_ctx)
+         .field("loss", &self.loss)
          .field("new_parameters", &self.new_parameters)
          .field("is_random_access_point", &self.is_random_access_point)
          .field("is_disposable", &self.is_disposable)
