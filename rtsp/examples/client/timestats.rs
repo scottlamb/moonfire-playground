@@ -94,8 +94,9 @@ pub(crate) async fn run(
         session.setup(i).await?;
     }
     let session = session.play(
-        moonfire_rtsp::client::PlayQuirks::default()
+        moonfire_rtsp::client::PlayPolicy::default()
         .initial_timestamp(opts.initial_timestamp)
+        .ignore_zero_seq(true)
     ).await?.demuxed()?;
 
     tokio::pin!(session);
@@ -121,18 +122,19 @@ pub(crate) async fn run(
                         );
                     },
                     CodecItem::VideoFrame(f) => {
+                        let ctx = f.start_ctx();
                         if idr_count < 2 && !f.is_random_access_point {
                             continue;
                         } else if idr_count < 2 {
                             idr_count += 1;
                             match idr_count {
                                 0 => info!("leading non-idr frame"),
-                                1 => first_idr = Some((f.ctx.msg_received(), f.timestamp)),
+                                1 => first_idr = Some((ctx.msg_received(), f.timestamp)),
                                 2 => {
                                     let (first_local, first_rtp) = first_idr.unwrap();
                                     info!("first GOP, rtp delta {:.3} sec in {:.3} sec",
                                              f.timestamp.elapsed_secs() - first_rtp.elapsed_secs(),
-                                             (f.ctx.msg_received() - first_local).as_secs_f64());
+                                             (ctx.msg_received() - first_local).as_secs_f64());
                                 },
                                 _ => unreachable!(),
                             };
@@ -141,7 +143,7 @@ pub(crate) async fn run(
                             f.stream_id,
                             &mut all_stats,
                             f.timestamp,
-                            f.ctx.msg_received(),
+                            ctx.msg_received(),
                             duration_from_fps[f.stream_id],
                         )
                     },

@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::{borrow::Cow, fmt::Debug, num::NonZeroU16, pin::Pin};
 
 use async_stream::try_stream;
@@ -24,7 +25,7 @@ pub mod rtp;
 /// Duration between keepalive RTSP requests during [Playing] state.
 pub const KEEPALIVE_DURATION: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Policy for handling the `rtptime` parameter normally seem in the `RTP-Info header.
+/// Policy for handling the `rtptime` parameter normally seem in the `RTP-Info` header.
 /// This parameter is used to map each stream's RTP timestamp to NPT ("normal play time"),
 /// allowing multiple streams to be played in sync.
 #[derive(Copy, Clone, Debug)]
@@ -79,14 +80,17 @@ impl std::str::FromStr for InitialTimestampPolicy {
     }
 }
 
-/// Adjustments to make on `PLAY` for non-compliant server implementations.
+/// Policy decisions to make on `PLAY`.
+///
+/// These are mostly adjustments for non-compliant server implementations.
 #[derive(Default)]
-pub struct PlayQuirks {
+pub struct PlayPolicy {
     initial_timestamp: InitialTimestampPolicy,
     ignore_zero_seq: bool,
+    enforce_timestamps_with_max_jump_secs: Option<NonZeroU32>,
 }
 
-impl PlayQuirks {
+impl PlayPolicy {
     pub fn initial_timestamp(self, initial_timestamp: InitialTimestampPolicy) -> Self {
         Self {
             initial_timestamp,
@@ -100,6 +104,19 @@ impl PlayQuirks {
     pub fn ignore_zero_seq(self, ignore_zero_seq: bool) -> Self {
         Self {
             ignore_zero_seq,
+            ..self
+        }
+    }
+
+    /// Enforces that timestamps are non-decreasing and jump forward by no more
+    /// than the given number of seconds.
+    ///
+    /// By default, no enforcement is done, and computed [crate::Timestamp]
+    /// values will go backward if subsequent 32-bit RTP timestamps differ by
+    /// more than `i32::MAX`.
+    pub fn enforce_timestamps_with_max_jump_secs(self, secs: NonZeroU32) -> Self {
+        Self {
+            enforce_timestamps_with_max_jump_secs: Some(secs),
             ..self
         }
     }
@@ -435,7 +452,7 @@ impl Session<Described> {
     /// Sends a `PLAY` request for the entire presentation.
     /// The presentation must support aggregate control, as defined in [RFC 2326
     /// section 1.3](https://tools.ietf.org/html/rfc2326#section-1.3).
-    pub async fn play(mut self, quirks: PlayQuirks) -> Result<Session<Playing>, Error> {
+    pub async fn play(mut self, policy: PlayPolicy) -> Result<Session<Playing>, Error> {
         let session_id = self.state.session_id.take().ok_or_else(|| format_err!("must SETUP before PLAY"))?;
         trace!("PLAY with channel mappings: {:#?}", &self.state.channels);
         let response = self.conn.send(
@@ -466,7 +483,7 @@ impl Session<Described> {
                     ssrc,
                     ..
                 }) => {
-                    let initial_rtptime = match quirks.initial_timestamp {
+                    let initial_rtptime = match policy.initial_timestamp {
                         InitialTimestampPolicy::Require
                         | InitialTimestampPolicy::Default if setup_streams > 1 => {
                             if initial_rtptime.is_none() {
@@ -474,7 +491,7 @@ impl Session<Described> {
                                     "Expected rtptime on PLAY with mode {:?}, missing on stream \
                                      {} ({:?}). Consider setting initial timestamp mode \
                                      use-if-all-present.",
-                                    quirks.initial_timestamp, i, &s.control);
+                                    policy.initial_timestamp, i, &s.control);
                             }
                             initial_rtptime
                         },
@@ -484,14 +501,17 @@ impl Session<Described> {
                         _ => None,
                     };
                     let initial_seq = match initial_seq {
-                        Some(0) if quirks.ignore_zero_seq => {
+                        Some(0) if policy.ignore_zero_seq => {
                             log::info!("Ignoring seq=0 on stream {}", i);
                             None
                         },
                         o => o,
                     };
                     s.state = StreamState::Playing {
-                        timeline: Timeline::new(initial_rtptime, s.clock_rate)?,
+                        timeline: Timeline::new(
+                            initial_rtptime,
+                            s.clock_rate,
+                            policy.enforce_timestamps_with_max_jump_secs)?,
                         rtp_handler: rtp::StrictSequenceChecker::new(ssrc, initial_seq),
                         rtcp_handler: rtcp::TimestampPrinter::new(),
                     };

@@ -30,8 +30,8 @@ pub(crate) struct Depacketizer {
 
 #[derive(Debug)]
 struct AccessUnit {
-    /// The context as of the start of the access unit.
-    ctx: crate::Context,
+    start_ctx: crate::Context,
+    end_ctx: crate::Context,
     timestamp: crate::Timestamp,
     stream_id: usize,
     new_sps: Option<Bytes>,
@@ -106,6 +106,7 @@ impl Depacketizer {
                     if premark.frag_buf.is_some() {
                         bail!("Timestamp changed from {} to {} in the middle of a fragmented NAL at seq={:04x} {:#?}", premark.access_unit.timestamp, pkt.timestamp, seq, &pkt.rtsp_ctx);
                     }
+                    premark.access_unit.end_ctx = pkt.rtsp_ctx;
                     self.pending = Some(std::mem::replace(&mut premark.access_unit, AccessUnit::start(pkt.rtsp_ctx, pkt.timestamp, pkt.stream_id)));
                 }
                 premark
@@ -202,6 +203,7 @@ impl Depacketizer {
             _ => bail!("bad nal header {:0x} at seq {:04x} {:#?}", nal_header, seq, &pkt.rtsp_ctx),
         }
         self.input_state = if pkt.mark {
+            premark.access_unit.end_ctx = pkt.rtsp_ctx;
             self.pending = Some(premark.access_unit);
             DepacketizerInputState::PostMark { timestamp: pkt.timestamp }
         } else {
@@ -229,7 +231,8 @@ impl Depacketizer {
         let picture = pending.picture.ok_or_else(|| format_err!("access unit has no picture"))?;
         let nal_header = h264_reader::nal::NalHeader::new(picture[0]).expect("nal header was previously valid");
         Ok(Some(super::CodecItem::VideoFrame(super::VideoFrame {
-            ctx: pending.ctx,
+            start_ctx: pending.start_ctx,
+            end_ctx: pending.end_ctx,
             new_parameters,
             timestamp: pending.timestamp,
             stream_id: pending.stream_id,
@@ -245,7 +248,8 @@ impl Depacketizer {
 impl AccessUnit {
     fn start(ctx: crate::Context, timestamp: crate::Timestamp, stream_id: usize) -> Self {
         AccessUnit {
-            ctx,
+            start_ctx: ctx,
+            end_ctx: ctx,
             timestamp,
             stream_id,
             new_sps: None,

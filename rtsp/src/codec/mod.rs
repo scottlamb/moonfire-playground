@@ -218,7 +218,10 @@ impl std::fmt::Debug for MessageFrame {
 pub struct VideoFrame {
     pub new_parameters: Option<VideoParameters>,
 
-    pub ctx: crate::Context,
+    // A pair of contexts: for the start and for the end.
+    // Having both can be useful to measure the total time elapsed while receiving the frame.
+    start_ctx: crate::Context,
+    end_ctx: crate::Context,
 
     /// This picture's timestamp in the time base associated with the stream.
     pub timestamp: crate::Timestamp,
@@ -246,12 +249,23 @@ pub struct VideoFrame {
     data: bytes::Bytes,
 }
 
+impl VideoFrame {
+    pub fn start_ctx(&self) -> crate::Context {
+        self.start_ctx
+    }
+
+    pub fn end_ctx(&self) -> crate::Context {
+        self.end_ctx
+    }
+}
+
 impl std::fmt::Debug for VideoFrame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         //use pretty_hex::PrettyHex;
         f.debug_struct("VideoFrame")
          .field("timestamp", &self.timestamp)
-         .field("ctx", &self.ctx)
+         .field("start_ctx", &self.start_ctx)
+         .field("end_ctx", &self.end_ctx)
          .field("new_parameters", &self.new_parameters)
          .field("is_random_access_point", &self.is_random_access_point)
          .field("is_disposable", &self.is_disposable)

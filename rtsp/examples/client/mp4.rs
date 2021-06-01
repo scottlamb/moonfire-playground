@@ -22,6 +22,7 @@ use moonfire_rtsp::codec::{CodecItem, AudioParameters, VideoParameters};
 
 use std::convert::TryFrom;
 use std::io::SeekFrom;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use tokio::io::{AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use url::Url;
@@ -502,8 +503,9 @@ pub(crate) async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Cre
         None
     };
     let session = session.play(
-        moonfire_rtsp::client::PlayQuirks::default()
+        moonfire_rtsp::client::PlayPolicy::default()
             .initial_timestamp(opts.initial_timestamp)
+            .enforce_timestamps_with_max_jump_secs(NonZeroU32::new(10).unwrap())
     ).await?.demuxed()?;
 
     // Read RTP data.

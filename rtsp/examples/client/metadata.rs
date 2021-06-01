@@ -13,7 +13,7 @@ pub async fn run(url: Url, credentials: Option<moonfire_rtsp::client::Credential
         .ok_or_else(|| format_err!("couldn't find onvif stream"))?;
     session.setup(onvif_stream_i).await?;
     let session = session.play(
-        moonfire_rtsp::client::PlayQuirks::default()
+        moonfire_rtsp::client::PlayPolicy::default()
             .ignore_zero_seq(true)
     ).await?.demuxed()?;
 
