@@ -19,7 +19,6 @@ use crate::{Context, codec::CodecItem};
 mod channel_mapping;
 mod parse;
 mod timeline;
-pub mod rtcp;
 pub mod rtp;
 
 /// Duration between keepalive RTSP requests during [Playing] state.
@@ -203,7 +202,6 @@ enum StreamState {
     Playing {
         timeline: Timeline,
         rtp_handler: rtp::StrictSequenceChecker,
-        rtcp_handler: rtcp::TimestampPrinter,
     }
 }
 
@@ -226,6 +224,7 @@ struct StreamStateInit {
     initial_rtptime: Option<u32>,
 }
 
+#[derive(Clone)]
 pub struct Credentials {
     pub username: String,
     pub password: String,
@@ -513,7 +512,6 @@ impl Session<Described> {
                             s.clock_rate,
                             policy.enforce_timestamps_with_max_jump_secs)?,
                         rtp_handler: rtp::StrictSequenceChecker::new(ssrc, initial_seq),
-                        rtcp_handler: rtcp::TimestampPrinter::new(),
                     };
                 },
                 StreamState::Uninit => {},
@@ -680,22 +678,17 @@ impl Session<Playing> {
             None => bail!("Data message on unexpected channel {} at {:#?}", c, &ctx),
         };
         let stream = &mut state.presentation.streams[m.stream_i];
-        let (mut timeline, rtp_handler, rtcp_handler) = match &mut stream.state {
-            StreamState::Playing{timeline, rtp_handler, rtcp_handler} => {
-                (timeline, rtp_handler, rtcp_handler)
+        let (mut timeline, rtp_handler) = match &mut stream.state {
+            StreamState::Playing{timeline, rtp_handler} => {
+                (timeline, rtp_handler)
             },
             _ => unreachable!("Session<Playing>'s {}->{:?} not in Playing state", c, m),
         };
         match m.channel_type {
-            ChannelType::Rtp => Ok(Some(PacketItem::RtpPacket(
-                rtp_handler.process(ctx, &mut timeline, m.stream_i, data.into_body())?))),
-            ChannelType::Rtcp => {
-                // TODO: pass RTCP packets along. Currenly this just logs them.
-                // There can be multiple packets per data message, so we'll need to
-                // keep Stream state.
-                rtcp_handler.data(ctx, &mut timeline, data.into_body())?;
-                Ok(None)
-            },
+            ChannelType::Rtp => Ok(Some(
+                rtp_handler.rtp(ctx, &mut timeline, m.stream_i, data.into_body())?)),
+            ChannelType::Rtcp => Ok(
+                rtp_handler.rtcp(ctx, &mut timeline, m.stream_i, data.into_body())?),
         }
     }
 

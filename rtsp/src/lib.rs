@@ -100,20 +100,23 @@ impl Debug for Timestamp {
     }
 }
 
+pub const UNIX_EPOCH: NtpTimestamp = NtpTimestamp((2_208_988_800) << 32);
+
 /// A wallclock time represented using the format of the Network Time Protocol.
 /// This isn't necessarily gathered from a real NTP server. Reported NTP
 /// timestamps are allowed to jump backwards and/or be complete nonsense.
 #[derive(Copy, Clone, PartialEq, PartialOrd, Eq, Ord)]
-pub struct NtpTimestamp(u64);
+pub struct NtpTimestamp(pub u64);
 
 impl std::fmt::Display for NtpTimestamp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let sec_since_epoch = ((self.0 >> 32) as u32).wrapping_sub(2_208_988_800);
+        let since_epoch = self.0.wrapping_sub(UNIX_EPOCH.0);
+        let sec_since_epoch = (since_epoch >> 32) as u32;
         let tm = time::at(time::Timespec {
             sec: i64::from(sec_since_epoch),
             nsec: 0,
         });
-        let ms = (self.0 & 0xFFFF_FFFF) * 1_000 >> 32;
+        let ms = (since_epoch & 0xFFFF_FFFF) * 1_000 >> 32;
         let zone_minutes = tm.tm_utcoff.abs() / 60;
         write!(
             f,
@@ -162,6 +165,10 @@ impl Context {
 
     pub fn msg_received(&self) -> std::time::Instant {
         self.msg_received
+    }
+
+    pub fn msg_pos(&self) -> u64 {
+        self.msg_pos
     }
 }
 

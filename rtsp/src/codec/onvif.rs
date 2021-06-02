@@ -72,6 +72,7 @@ impl Depacketizer {
             State::Idle => {
                 if pkt.mark { // fast-path: avoid copy.
                     self.state = State::Ready(super::MessageFrame {
+                        stream_id: pkt.stream_id,
                         loss: pkt.loss,
                         ctx: pkt.rtsp_ctx,
                         timestamp: pkt.timestamp,
@@ -93,6 +94,7 @@ impl Depacketizer {
                 self.high_water_size,
                 in_progress.data.remaining());
             self.state = State::Ready(super::MessageFrame {
+                stream_id: pkt.stream_id,
                 ctx: in_progress.ctx,
                 timestamp: in_progress.timestamp,
                 data: in_progress.data.freeze(),

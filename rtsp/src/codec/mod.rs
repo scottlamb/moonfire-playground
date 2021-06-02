@@ -201,6 +201,7 @@ pub struct MessageParameters(onvif::CompressionType);
 pub struct MessageFrame {
     pub ctx: crate::Context,
     pub timestamp: crate::Timestamp,
+    pub stream_id: usize,
 
     /// Number of lost RTP packets before this message frame. See [crate::client::rtp::Packet::loss].
     /// If this is non-zero, a prefix of the message may be missing.
@@ -214,6 +215,7 @@ impl std::fmt::Debug for MessageFrame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AudioFrame")
          .field("ctx", &self.ctx)
+         .field("stream_id", &self.stream_id)
          .field("loss", &self.loss)
          .field("timestamp", &self.timestamp)
          .field("data", &self.data.hex_dump())

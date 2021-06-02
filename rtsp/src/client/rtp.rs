@@ -2,8 +2,10 @@
 
 use bytes::{Buf, Bytes};
 use failure::{Error, bail, format_err};
-use log::trace;
+use log::{debug, trace};
 use pretty_hex::PrettyHex;
+
+use crate::client::PacketItem;
 
 /// An RTP packet.
 #[derive(Debug)]
@@ -36,7 +38,9 @@ pub struct SenderReport {
     pub ntp_timestamp: crate::NtpTimestamp,
 }
 
-/// RTP demarshaller which ensures packets have the correct SSRC and monotonically increasing SEQ.
+
+/// RTP/RTCP demarshaller which ensures packets have the correct SSRC and
+/// monotonically increasing SEQ.
 ///
 /// This reports packet loss (via [Packet::loss]) but doesn't prohibit it, except for losses
 /// of more than `i16::MAX` which would be indistinguishable from non-monotonic sequence numbers.
@@ -64,8 +68,8 @@ impl StrictSequenceChecker {
         }
     }
 
-    pub(super) fn process(&mut self, rtsp_ctx: crate::Context, timeline: &mut super::Timeline,
-                          stream_id: usize, mut data: Bytes) -> Result<Packet, Error> {
+    pub(super) fn rtp(&mut self, rtsp_ctx: crate::Context, timeline: &mut super::Timeline,
+                      stream_id: usize, mut data: Bytes) -> Result<PacketItem, Error> {
         // Terrible hack to try to make sense of the GW Security GW4089IP's audio stream.
         // It appears to have one RTSP interleaved message wrapped in another. RTP and RTCP
         // packets can never start with '$', so this shouldn't interfere with well-behaved
@@ -103,7 +107,7 @@ impl StrictSequenceChecker {
         data.truncate(payload_range.end);
         data.advance(payload_range.start);
         self.next_seq = Some(sequence_number.wrapping_add(1));
-        return Ok(Packet {
+        return Ok(PacketItem::RtpPacket(Packet {
             stream_id,
             rtsp_ctx,
             timestamp,
@@ -111,6 +115,59 @@ impl StrictSequenceChecker {
             loss,
             mark,
             payload: data,
-        })
+        }))
+    }
+
+    pub(super) fn rtcp(&mut self, rtsp_ctx: crate::Context, timeline: &mut super::Timeline,
+                       stream_id: usize, mut data: Bytes) -> Result<Option<PacketItem>, Error> {
+        use rtcp::packet::Packet;
+        let mut sr = None;
+        let mut i = 0;
+        while !data.is_empty() {
+            let h = match rtcp::header::Header::unmarshal(&data) {
+                Err(e) => bail!("corrupt RTCP header at {:#?}: {}", &rtsp_ctx, e),
+                Ok(h) => h,
+            };
+            let pkt_len = (usize::from(h.length) + 1) * 4;
+            if pkt_len > data.len() {
+                bail!("rtcp pkt len {} vs remaining body len {} at {:#?}",
+                      pkt_len, data.len(), &rtsp_ctx);
+            }
+            let pkt = data.split_to(pkt_len);
+            match h.packet_type {
+                rtcp::header::PacketType::SenderReport => {
+                    if i > 0 {
+                        bail!("RTCP SR must be first in packet");
+                    }
+                    let pkt = match rtcp::sender_report::SenderReport::unmarshal(&pkt) {
+                        Err(e) => bail!("corrupt RTCP SR at {:#?}: {}", &rtsp_ctx, e),
+                        Ok(p) => p,
+                    };
+
+                    let timestamp = match timeline.place(pkt.rtp_time) {
+                        Ok(ts) => ts,
+                        Err(e) => return Err(e.context(format!(
+                            "bad RTP timestamp in RTCP SR {:#?} at {:#?}",
+                            &pkt, &rtsp_ctx)).into()),
+                    };
+
+                    // TODO: verify ssrc.
+
+                    sr = Some(SenderReport {
+                        stream_id,
+                        rtsp_ctx,
+                        timestamp,
+                        ntp_timestamp: crate::NtpTimestamp(pkt.ntp_time),
+                    });
+                },
+                /*rtcp::header::PacketType::SourceDescription => {
+                    let pkt = rtcp::source_description::SourceDescription::unmarshal(&pkt)?;
+                    debug!("rtcp source description: {:#?}", &pkt);
+                },*/
+                _ => debug!("rtcp: {:?}", h.packet_type),
+            }
+            i += 1;
+        }
+        Ok(sr.map(|sr| PacketItem::SenderReport(sr)))
     }
 }
