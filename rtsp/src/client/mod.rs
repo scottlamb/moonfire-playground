@@ -344,7 +344,7 @@ impl RtspConnection {
                 };
                 let www_authenticate = www_authenticate.as_str();
                 if !www_authenticate.starts_with("Digest ") {
-                    bail!("Non-digest authentication requested at {:#?}", &msg.ctx);
+                    bail!("Non-digest authentication requested at {:#?}: {}", &msg.ctx, www_authenticate);
                 }
                 let www_authenticate = digest_auth::WwwAuthenticateHeader::parse(www_authenticate)?;
                 self.requested_auth = Some(www_authenticate);

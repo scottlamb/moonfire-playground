@@ -11,7 +11,7 @@ use futures::StreamExt;
 use log::info;
 use moonfire_rtsp::codec::{CodecItem, Parameters};
 use parking_lot::Mutex;
-use rusqlite::named_params;
+use rusqlite::{named_params, params};
 use rtsp_types::Url;
 use std::convert::TryFrom;
 use std::num::NonZeroU32;
@@ -51,6 +51,7 @@ struct StreamArgs {
 struct Frame {
     conn_id: i64,
     stream_id: usize,
+    frame_seq: u64,
     rtp_timestamp: i64,
     received_start: u64,
     received_end: u64,
@@ -65,6 +66,7 @@ struct Frame {
 struct SenderReport {
     conn_id: i64,
     stream_id: usize,
+    sr_seq: u64,
     rtp_timestamp: i64,
     received: u64,
     ntp_timestamp: moonfire_rtsp::NtpTimestamp,
@@ -83,7 +85,7 @@ async fn stream(mut args: StreamArgs) -> Result<(), Error> {
             let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
             db.execute(
                 "insert into conn (url, start) values (?, ?)",
-                rusqlite::params![args.url.as_str(), u64::try_from(now.as_micros())?],
+                params![args.url.as_str(), u64::try_from(now.as_micros())?],
             )?;
             db.last_insert_rowid()
         };
@@ -99,7 +101,7 @@ async fn stream(mut args: StreamArgs) -> Result<(), Error> {
             let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
             db.execute(
                 "update conn set lost = ?, lost_reason = ? where id = ?",
-                rusqlite::params![u64::try_from(now.as_micros())?, &lost_reason, conn_id],
+                params![u64::try_from(now.as_micros())?, &lost_reason, conn_id],
             )?;
         }
         if !reconnect {
@@ -110,10 +112,19 @@ async fn stream(mut args: StreamArgs) -> Result<(), Error> {
     Ok(())
 }
 
+#[derive(Copy, Clone)]
+struct StreamInfo {
+    duration_from_fps: Option<NonZeroU32>,
+    cum_duration: Option<u64>,
+    frame_seq: u64,
+    sr_seq: u64,
+}
+
 async fn stream_once(conn_id: i64, args: &mut StreamArgs) -> Result<bool, Error> {
     let mut session = moonfire_rtsp::client::Session::describe(args.url.clone(), args.creds.clone()).await?;
-    let mut cum_durations = vec![Some(0); session.streams().len()];
-    let mut durations_from_fps = vec![None; session.streams().len()];
+    let mut streams = vec![
+        StreamInfo { duration_from_fps: None, cum_duration: Some(0), frame_seq: 0, sr_seq: 0 };
+        session.streams().len()];
     {
         let mut db = args.db.lock();
         let tx = db.transaction()?;
@@ -133,7 +144,7 @@ async fn stream_once(conn_id: i64, args: &mut StreamArgs) -> Result<bool, Error>
             if let Some(Parameters::Video(v)) = s.parameters() {
                 if let Some((num, denom)) = v.frame_rate() {
                     if clock_rate % denom == 0 {
-                        durations_from_fps[i] = NonZeroU32::new(num * (clock_rate / denom));
+                        streams[i].duration_from_fps = NonZeroU32::new(num * (clock_rate / denom));
                     }
                 }
             }
@@ -155,58 +166,75 @@ async fn stream_once(conn_id: i64, args: &mut StreamArgs) -> Result<bool, Error>
     loop {
         tokio::select! {
             item = session.next() => {
-                let frame = match item.transpose()? {
-                    Some(CodecItem::AudioFrame(f)) => Frame {
-                        conn_id,
-                        stream_id: f.stream_id,
-                        rtp_timestamp: f.timestamp.elapsed(),
-                        received_start: rescale_received(&f.ctx, f.timestamp.clock_rate()),
-                        received_end: rescale_received(&f.ctx, f.timestamp.clock_rate()),
-                        pos: f.ctx.msg_pos(),
-                        loss: f.loss,
-                        duration: Some(f.frame_length),
-                        cum_duration: cum_durations[f.stream_id],
-                        idr: None,
+                match item.transpose()? {
+                    Some(CodecItem::AudioFrame(f)) => {
+                        let stream = &mut streams[f.stream_id];
+                        args.item_writer.send(Item::Frame(Frame {
+                            conn_id,
+                            stream_id: f.stream_id,
+                            frame_seq: stream.frame_seq,
+                            rtp_timestamp: f.timestamp.elapsed(),
+                            received_start: rescale_received(&f.ctx, f.timestamp.clock_rate()),
+                            received_end: rescale_received(&f.ctx, f.timestamp.clock_rate()),
+                            pos: f.ctx.msg_pos(),
+                            loss: f.loss,
+                            duration: Some(f.frame_length),
+                            cum_duration: stream.cum_duration,
+                            idr: None,
+                        })).unwrap();
+                        stream.frame_seq += 1;
+                        stream.cum_duration =
+                            Some(stream.cum_duration.unwrap() + u64::from(f.frame_length.get()));
                     },
-                    Some(CodecItem::VideoFrame(f)) => Frame {
-                        conn_id,
-                        stream_id: f.stream_id,
-                        rtp_timestamp: f.timestamp.elapsed(),
-                        received_start: rescale_received(&f.start_ctx(), f.timestamp.clock_rate()),
-                        received_end: rescale_received(&f.end_ctx(), f.timestamp.clock_rate()),
-                        pos: f.start_ctx().msg_pos(),
-                        loss: f.loss,
-                        duration: durations_from_fps[f.stream_id],
-                        cum_duration: cum_durations[f.stream_id],
-                        idr: Some(f.is_random_access_point),
+                    Some(CodecItem::VideoFrame(f)) => {
+                        let stream = &mut streams[f.stream_id];
+                        args.item_writer.send(Item::Frame(Frame {
+                            conn_id,
+                            stream_id: f.stream_id,
+                            frame_seq: stream.frame_seq,
+                            rtp_timestamp: f.timestamp.elapsed(),
+                            received_start: rescale_received(&f.start_ctx(), f.timestamp.clock_rate()),
+                            received_end: rescale_received(&f.end_ctx(), f.timestamp.clock_rate()),
+                            pos: f.start_ctx().msg_pos(),
+                            loss: f.loss,
+                            duration: stream.duration_from_fps,
+                            cum_duration: stream.cum_duration,
+                            idr: Some(f.is_random_access_point),
+                        })).unwrap();
+                        stream.frame_seq += 1;
+                        stream.cum_duration =
+                            stream.duration_from_fps.map(|d| u64::from(d.get()) * stream.frame_seq);
                     },
-                    Some(CodecItem::MessageFrame(f)) => Frame {
-                        conn_id,
-                        stream_id: f.stream_id,
-                        rtp_timestamp: f.timestamp.elapsed(),
-                        received_start: rescale_received(&f.ctx, f.timestamp.clock_rate()),
-                        received_end: rescale_received(&f.ctx, f.timestamp.clock_rate()),
-                        pos: f.ctx.msg_pos(),
-                        loss: f.loss,
-                        duration: None,
-                        cum_duration: None,
-                        idr: None,
+                    Some(CodecItem::MessageFrame(f)) => {
+                        let stream = &mut streams[f.stream_id];
+                        args.item_writer.send(Item::Frame(Frame {
+                            conn_id,
+                            stream_id: f.stream_id,
+                            frame_seq: stream.frame_seq,
+                            rtp_timestamp: f.timestamp.elapsed(),
+                            received_start: rescale_received(&f.ctx, f.timestamp.clock_rate()),
+                            received_end: rescale_received(&f.ctx, f.timestamp.clock_rate()),
+                            pos: f.ctx.msg_pos(),
+                            loss: f.loss,
+                            duration: None,
+                            cum_duration: None,
+                            idr: None,
+                        })).unwrap();
+                        stream.frame_seq += 1;
                     },
                     Some(CodecItem::SenderReport(sr)) => {
                         args.item_writer.send(Item::SenderReport(SenderReport {
                             conn_id,
                             stream_id: sr.stream_id,
+                            sr_seq: streams[sr.stream_id].sr_seq,
                             rtp_timestamp: sr.timestamp.elapsed(),
                             received: rescale_received(&sr.rtsp_ctx, sr.timestamp.clock_rate()),
                             ntp_timestamp: sr.ntp_timestamp,
                         }))?;
-                        continue;
+                        streams[sr.stream_id].sr_seq += 1;
                     },
                     None => break,
-                };
-                cum_durations[frame.stream_id] = cum_durations[frame.stream_id]
-                    .and_then(|d| frame.duration.map(|fd| d + u64::from(fd.get())));
-                args.item_writer.send(Item::Frame(frame))?;
+                }
             },
             _ = &mut args.stop => {
                 return Ok(false);
@@ -227,20 +255,23 @@ fn flush(db: &mut rusqlite::Connection, items: &mut Vec<Item>) -> Result<(), Err
     info!("flush of {} items", items.len());
     let tx = db.transaction()?;
     let mut insert_frame = tx.prepare_cached(r#"
-        insert into frame (conn_id, stream_id, rtp_timestamp, received_start, received_end,
-                           pos, loss, duration, cum_duration, idr)
-                   values (:conn_id, :stream_id, :rtp_timestamp, :received_start, :received_end,
-                           :pos, :loss, :duration, :cum_duration, :idr)
+        insert into frame (conn_id, stream_id, frame_seq, rtp_timestamp, received_start,
+                           received_end, pos, loss, duration, cum_duration, idr)
+                   values (:conn_id, :stream_id, :frame_seq, :rtp_timestamp, :received_start,
+                           :received_end, :pos, :loss, :duration, :cum_duration, :idr)
     "#)?;
     let mut insert_sr = tx.prepare_cached(r#"
-        insert into sender_report (conn_id, stream_id, rtp_timestamp, received, ntp_timestamp)
-                           values (:conn_id, :stream_id, :rtp_timestamp, :received, :ntp_timestamp)
+        insert into sender_report (conn_id, stream_id, sr_seq, rtp_timestamp, received,
+                                   ntp_timestamp)
+                           values (:conn_id, :stream_id, :sr_seq, :rtp_timestamp, :received,
+                                   :ntp_timestamp)
     "#)?;
     for item in items.iter_mut() {
         match item {
             Item::Frame(f) => insert_frame.execute(named_params! {
                 ":conn_id": &f.conn_id,
                 ":stream_id": &f.stream_id,
+                ":frame_seq": &f.frame_seq,
                 ":rtp_timestamp": &f.rtp_timestamp,
                 ":received_start": &f.received_start,
                 ":received_end": &f.received_end,
@@ -253,6 +284,7 @@ fn flush(db: &mut rusqlite::Connection, items: &mut Vec<Item>) -> Result<(), Err
             Item::SenderReport(sr) => insert_sr.execute(named_params! {
                 ":conn_id": &sr.conn_id,
                 ":stream_id": &sr.stream_id,
+                ":sr_seq": &sr.sr_seq,
                 ":rtp_timestamp": &sr.rtp_timestamp,
                 ":received": &sr.received,
                 ":ntp_timestamp": &sr.ntp_timestamp.0.wrapping_sub(moonfire_rtsp::UNIX_EPOCH.0),
@@ -277,6 +309,7 @@ pub(crate) async fn run(mut opts: Opts) -> Result<(), Error> {
         .shared();
 
     let mut db = rusqlite::Connection::open(&opts.db)?;
+    db.pragma_update(None, "journal_mode", &"wal")?;
     let tx = db.transaction()?;
     tx.execute_batch(include_str!("timedump.sql"))?;
     tx.commit()?;
