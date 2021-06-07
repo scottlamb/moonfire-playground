@@ -1,7 +1,5 @@
 //! RTSP client examples.
 
-mod metadata;
-mod mp4;
 mod timedump;
 mod timestats;
 
@@ -11,41 +9,9 @@ use std::{fmt::Write, str::FromStr};
 use structopt::StructOpt;
 
 #[derive(StructOpt)]
-struct Source {
-    #[structopt(long, parse(try_from_str))]
-    url: url::Url,
-
-    #[structopt(long, requires="password")]
-    username: Option<String>,
-
-    #[structopt(long, requires="username")]
-    password: Option<String>,
-}
-
-#[derive(StructOpt)]
 enum Cmd {
-    Mp4 {
-        #[structopt(flatten)]
-        src: Source,
-
-        #[structopt(flatten)]
-        opts: mp4::Opts,
-    },
-
-    Metadata {
-        #[structopt(flatten)]
-        src: Source,
-    },
-
     Timedump(timedump::Opts),
-
-    Timestats {
-        #[structopt(flatten)]
-        src: Source,
-
-        #[structopt(flatten)]
-        opts: timestats::Opts,
-    },
+    Timestats(timestats::Opts),
 }
 
 /// Returns a pretty-and-informative version of `e`.
@@ -89,9 +55,9 @@ async fn main() {
 }
 
 /// Interpets the `username` and `password` of a [Source].
-fn creds(username: Option<String>, password: Option<String>) -> Option<moonfire_rtsp::client::Credentials> {
+fn creds(username: Option<String>, password: Option<String>) -> Option<retina::client::Credentials> {
     match (username, password) {
-        (Some(username), Some(password)) => Some(moonfire_rtsp::client::Credentials {
+        (Some(username), Some(password)) => Some(retina::client::Credentials {
             username,
             password,
         }),
@@ -103,11 +69,7 @@ fn creds(username: Option<String>, password: Option<String>) -> Option<moonfire_
 async fn main_inner() -> Result<(), Error> {
     let cmd = Cmd::from_args();
     match cmd {
-        Cmd::Mp4 { src, opts } => mp4::run(src.url, creds(src.username, src.password), opts).await,
-        Cmd::Metadata { src } => metadata::run(src.url, creds(src.username, src.password)).await,
         Cmd::Timedump(opts) => timedump::run(opts).await,
-        Cmd::Timestats { src, opts } => timestats::run(
-            src.url, creds(src.username, src.password), opts
-        ).await,
+        Cmd::Timestats(opts) => timestats::run(opts).await,
     }
 }

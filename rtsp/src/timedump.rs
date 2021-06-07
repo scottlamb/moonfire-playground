@@ -9,10 +9,10 @@ use futures::Future;
 use futures::FutureExt;
 use futures::StreamExt;
 use log::info;
-use moonfire_rtsp::codec::{CodecItem, Parameters};
+use retina::codec::{CodecItem, Parameters};
 use parking_lot::Mutex;
 use rusqlite::{named_params, params};
-use rtsp_types::Url;
+use url::Url;
 use std::convert::TryFrom;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -23,7 +23,7 @@ use std::time::SystemTime;
 #[derive(structopt::StructOpt)]
 pub(crate) struct Opts {
     #[structopt(default_value, long)]
-    initial_timestamp: moonfire_rtsp::client::InitialTimestampPolicy,
+    initial_timestamp: retina::client::InitialTimestampPolicy,
 
     #[structopt(long, parse(from_os_str))]
     db: PathBuf,
@@ -40,8 +40,8 @@ pub(crate) struct Opts {
 
 struct StreamArgs {
     url: Url,
-    creds: Option<moonfire_rtsp::client::Credentials>,
-    initial_timestamp: moonfire_rtsp::client::InitialTimestampPolicy,
+    creds: Option<retina::client::Credentials>,
+    initial_timestamp: retina::client::InitialTimestampPolicy,
     stop: Pin<Box<dyn Future<Output = ()> + Send>>,
     db: Arc<Mutex<rusqlite::Connection>>,
     item_writer: tokio::sync::mpsc::UnboundedSender<Item>,
@@ -69,7 +69,7 @@ struct SenderReport {
     sr_seq: u64,
     rtp_timestamp: i64,
     received: u64,
-    ntp_timestamp: moonfire_rtsp::NtpTimestamp,
+    ntp_timestamp: retina::NtpTimestamp,
 }
 
 #[derive(Debug)]
@@ -121,7 +121,7 @@ struct StreamInfo {
 }
 
 async fn stream_once(conn_id: i64, args: &mut StreamArgs) -> Result<bool, Error> {
-    let mut session = moonfire_rtsp::client::Session::describe(args.url.clone(), args.creds.clone()).await?;
+    let mut session = retina::client::Session::describe(args.url.clone(), args.creds.clone()).await?;
     let mut streams = vec![
         StreamInfo { duration_from_fps: None, cum_duration: Some(0), frame_seq: 0, sr_seq: 0 };
         session.streams().len()];
@@ -156,7 +156,7 @@ async fn stream_once(conn_id: i64, args: &mut StreamArgs) -> Result<bool, Error>
         session.setup(i).await?;
     }
     let session = session.play(
-        moonfire_rtsp::client::PlayPolicy::default()
+        retina::client::PlayPolicy::default()
         .initial_timestamp(args.initial_timestamp)
         .ignore_zero_seq(true)
     ).await?.demuxed()?;
@@ -244,7 +244,7 @@ async fn stream_once(conn_id: i64, args: &mut StreamArgs) -> Result<bool, Error>
     Ok(true)
 }
 
-fn rescale_received(ctx: &moonfire_rtsp::Context, clock_rate: NonZeroU32) -> u64 {
+fn rescale_received(ctx: &retina::Context, clock_rate: NonZeroU32) -> u64 {
     u64::try_from(
         (ctx.msg_received() - ctx.conn_established()).as_nanos()
         * u128::from(clock_rate.get())
@@ -287,7 +287,7 @@ fn flush(db: &mut rusqlite::Connection, items: &mut Vec<Item>) -> Result<(), Err
                 ":sr_seq": &sr.sr_seq,
                 ":rtp_timestamp": &sr.rtp_timestamp,
                 ":received": &sr.received,
-                ":ntp_timestamp": &sr.ntp_timestamp.0.wrapping_sub(moonfire_rtsp::UNIX_EPOCH.0),
+                ":ntp_timestamp": &sr.ntp_timestamp.0.wrapping_sub(retina::UNIX_EPOCH.0),
             }).with_context(|_| format_err!("unable to write {:#?}", &sr))?,
         };
     }

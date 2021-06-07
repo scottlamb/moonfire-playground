@@ -1,17 +1,25 @@
 use failure::{Error, format_err};
 use futures::StreamExt;
 use log::{info, warn};
-use moonfire_rtsp::codec::{CodecItem, Parameters};
-use rtsp_types::Url;
+use retina::codec::{CodecItem, Parameters};
 use std::convert::TryFrom;
 
 #[derive(structopt::StructOpt)]
 pub(crate) struct Opts {
     #[structopt(default_value, long)]
-    initial_timestamp: moonfire_rtsp::client::InitialTimestampPolicy,
+    initial_timestamp: retina::client::InitialTimestampPolicy,
 
     #[structopt(long)]
     streams: Option<Vec<usize>>,
+
+    #[structopt(long, parse(try_from_str))]
+    url: url::Url,
+
+    #[structopt(long, requires="password")]
+    username: Option<String>,
+
+    #[structopt(long, requires="username")]
+    password: Option<String>,
 }
 
 #[derive(Clone)]
@@ -19,13 +27,13 @@ struct StreamStats {
     pkts: u64,
     tot_duration: i64,
     prev_duration: u32,
-    first: moonfire_rtsp::Timestamp,
+    first: retina::Timestamp,
     first_instant: std::time::Instant,
-    latest: moonfire_rtsp::Timestamp,
+    latest: retina::Timestamp,
     latest_instant: std::time::Instant,
 }
 
-fn process(stream_id: usize, all_stats: &mut [Option<StreamStats>], ts: moonfire_rtsp::Timestamp,
+fn process(stream_id: usize, all_stats: &mut [Option<StreamStats>], ts: retina::Timestamp,
            when: std::time::Instant, duration: u32, loss: u16) {
     if loss > 0 {
         warn!("Lost {} RTP packets on stream {}", loss, stream_id);
@@ -73,12 +81,11 @@ fn process(stream_id: usize, all_stats: &mut [Option<StreamStats>], ts: moonfire
     stats.pkts += 1;
 }
 
-pub(crate) async fn run(
-    url: Url, credentials: Option<moonfire_rtsp::client::Credentials>, opts: Opts
-) -> Result<(), Error> {
+pub(crate) async fn run(opts: Opts) -> Result<(), Error> {
     let stop = tokio::signal::ctrl_c();
 
-    let mut session = moonfire_rtsp::client::Session::describe(url, credentials).await?;
+    let creds = super::creds(opts.username, opts.password);
+    let mut session = retina::client::Session::describe(opts.url, creds).await?;
     info!("Streams: {:#?}", session.streams());
     let mut all_stats = vec![None; session.streams().len()];
     let mut duration_from_fps = vec![0; session.streams().len()];
@@ -97,7 +104,7 @@ pub(crate) async fn run(
         session.setup(i).await?;
     }
     let session = session.play(
-        moonfire_rtsp::client::PlayPolicy::default()
+        retina::client::PlayPolicy::default()
         .initial_timestamp(opts.initial_timestamp)
         .ignore_zero_seq(true)
     ).await?.demuxed()?;
