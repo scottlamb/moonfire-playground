@@ -57,7 +57,7 @@ impl WatcherConfig {
             .next().ok_or_else(|| format_err!("camera {} has no streams", &self.camera_name))?
             .1.config.as_ref()
             .ok_or_else(|| format_err!("camera {} has no config for first stream", &self.camera_name))?;
-        let mut url = Url::parse(&stream_config.rtsp_url)?;
+        let mut url = Url::parse(&stream_config.url)?;
         info!("{}: url={}", &self.camera_name, &url);
         url.set_username(&nvr_config.username).unwrap();
         url.set_password(Some(&nvr_config.password)).unwrap();

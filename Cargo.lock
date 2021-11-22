@@ -1076,6 +1076,7 @@ dependencies = [
  "serde_json",
  "time",
  "tokio",
+ "url",
  "uuid",
 ]
 
@@ -2357,6 +2358,7 @@ dependencies = [
  "idna",
  "matches",
  "percent-encoding",
+ "serde",
 ]
 
 [[package]]

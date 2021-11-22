@@ -263,8 +263,8 @@ impl WatcherConfig {
         let camera = ctx.cameras_by_name.get(camera_name.as_str()).ok_or_else(|| format_err!("Dahua camera {}: no such camera in NVR", &camera_name))?;
         let nvr_config = camera.config.as_ref().ok_or_else(|| format_err!("Dahua camera {}: no config", &camera_name))?;
         let client = Client::new();
-        let h = nvr_config.onvif_host.as_ref()
-            .ok_or_else(|| format_err!("Dahua camera {} has no ONVIF host", &camera_name))?;
+        let onvif_base_url = nvr_config.onvif_base_url.as_ref()
+            .ok_or_else(|| format_err!("Dahua camera {} has no ONVIF base URL", &camera_name))?;
         let mut signals = Vec::with_capacity(self.signals.len());
         for cfg in self.signals {
             let n = match &cfg {
@@ -281,7 +281,7 @@ impl WatcherConfig {
             name: camera_name,
             client,
             dry_run: ctx.dry_run,
-            url: Url::parse(&format!("http://{}{}", &h, ATTACH_URL))?,
+            url: onvif_base_url.join(ATTACH_URL)?,
             username: nvr_config.username.clone(),
             password: nvr_config.password.clone(),
             updater: ctx.updater.clone(),

@@ -101,12 +101,12 @@ impl WatcherConfig {
         let signal = ctx.signals_by_name.get(self.signal_name.as_str()).ok_or_else(|| format_err!("Hikvision camera {}: no such signal {} in NVR", &self.camera_name, &self.signal_name))?;
         let client = Client::builder()
             .build()?;
-        let h = nvr_config.onvif_host.as_ref()
-            .ok_or_else(|| format_err!("Hikvision camera {} has no ONVIF host", &self.camera_name))?;
+        let onvif_base_url = nvr_config.onvif_base_url.as_ref()
+            .ok_or_else(|| format_err!("Hikvision camera {} has no ONVIF base URL", &self.camera_name))?;
         let mut w = Watcher {
             name: self.camera_name,
             client,
-            url: Url::parse(&format!("http://{}/Event/notification/alertStream", &h))?,
+            url: onvif_base_url.join("/Event/notification/alertStream")?,
             auth: basic_auth(&nvr_config.username, &nvr_config.password),
             updater: ctx.updater.clone(),
             dry_run: ctx.dry_run,

@@ -2,6 +2,7 @@ use failure::Error;
 use log::trace;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use url::Url;
 use uuid::Uuid;
 
 pub use moonfire_base::time::{Time, Duration};
@@ -30,7 +31,6 @@ pub struct Session {
 pub struct Camera {
     pub uuid: Uuid,
     pub short_name: String,
-    pub description: String,
     pub config: Option<CameraConfig>,
     pub streams: BTreeMap<String, Stream>,
 }
@@ -38,8 +38,11 @@ pub struct Camera {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct CameraConfig {
-    pub onvif_host: Option<String>,
+    #[serde(default)]
+    pub onvif_base_url: Option<Url>,
+    #[serde(default)]
     pub username: String,
+    #[serde(default)]
     pub password: String,
 }
 
@@ -59,7 +62,7 @@ pub struct Stream {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct StreamConfig {
-    pub rtsp_url: String,
+    pub url: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -139,7 +142,7 @@ pub struct ViewRequest<'a> {
 pub struct Signal {
     pub id: u32,
     pub cameras: BTreeMap<Uuid, String>,
-    pub source: Uuid,
+    pub uuid: Uuid,
     pub type_: Uuid,
     pub short_name: String,
 }
