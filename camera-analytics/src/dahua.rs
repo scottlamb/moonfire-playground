@@ -40,6 +40,7 @@ use reqwest::Client;
 use reqwest::Url;
 use std::collections::BTreeMap;
 use serde::Deserialize;
+use std::convert::TryFrom;
 use std::time::Duration;
 
 static CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -308,15 +309,18 @@ impl Watcher {
         let mut resp = send_with_timeout(CONNECT_TIMEOUT, self.client.get(self.url.clone())).await?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             let v = {
-                let auth = resp.headers().get(header::WWW_AUTHENTICATE)
-                    .ok_or_else(|| format_err!("Unauthorized with no WWW-Authenticate"))?;
-                let auth = auth.to_str()?;
-                if !auth.starts_with("Digest ") {
-                    bail!("Non-digest auth requested: {}", &auth);
-                }
-                let mut auth = digest_auth::WwwAuthenticateHeader::parse(auth)?;
-                let ctx = digest_auth::AuthContext::new(&self.username, &self.password, self.url.path());
-                auth.respond(&ctx)?.to_string()
+                let auth = resp.headers().get_all(header::WWW_AUTHENTICATE);
+                let mut client =
+                    http_auth::PasswordClient::try_from(auth).map_err(failure::err_msg)?;
+                client
+                    .respond(&http_auth::PasswordParams {
+                        username: &self.username,
+                        password: &self.password,
+                        uri: &self.url.as_str(),
+                        method: "GET",
+                        body: Some(&[]),
+                    })
+                    .map_err(failure::err_msg)?
             };
             resp = send_with_timeout(
                 CONNECT_TIMEOUT,
