@@ -48,7 +48,6 @@
 //!    * the `activePostCount` is non-decreasing for event types, not for single events. It's
 //!      apparently useless.
 
-use bytes::{BufMut, BytesMut};
 use crate::multipart::{Part, self};
 use crate::send_with_timeout;
 use failure::{bail, format_err, Error};
@@ -58,8 +57,8 @@ use reqwest::header::{self, HeaderValue};
 use reqwest::Url;
 use mime;
 use std::collections::BTreeMap;
+use std::convert::TryInto;
 use serde::Deserialize;
-use std::io::Write;
 use std::time::Duration;
 use xml;
 
@@ -107,7 +106,9 @@ impl WatcherConfig {
             name: self.camera_name,
             client,
             url: onvif_base_url.join("/Event/notification/alertStream")?,
-            auth: basic_auth(&nvr_config.username, &nvr_config.password),
+            auth: http_auth::basic::encode_credentials(&nvr_config.username, &nvr_config.password)
+                .try_into()
+                .unwrap(),
             updater: ctx.updater.clone(),
             dry_run: ctx.dry_run,
             signal_id: signal.id,
@@ -239,20 +240,6 @@ fn parse(body: &[u8]) -> Result<Notification, Error> {
     }
 }
 
-fn basic_auth(username: &str, password: &str) -> HeaderValue {
-    let mut b = BytesMut::with_capacity("Basic ".len() + (username.len() + password.len() + 1) * 4 / 3 + 4);
-    b.extend_from_slice(b"Basic ");
-    let mut w = b.writer();
-    {
-        let mut e = base64::write::EncoderWriter::new(&mut w, base64::STANDARD);
-        e.write_all(username.as_bytes()).unwrap();
-        e.write_all(b":").unwrap();
-        e.write_all(password.as_bytes()).unwrap();
-        e.finish().unwrap();
-    }
-    HeaderValue::from_maybe_shared(w.into_inner().freeze()).unwrap()
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync;
@@ -315,11 +302,5 @@ mod tests {
             event_type: Some("VMD".to_owned()),
             active: Some(true),
         });
-    }
-
-    #[test]
-    fn basic_auth() {
-        assert_eq!(super::basic_auth("Aladdin", "OpenSesame").to_str().unwrap(),
-                   "Basic QWxhZGRpbjpPcGVuU2VzYW1l");
     }
 }

@@ -207,8 +207,6 @@ checksum = "b700ce4376041dcd0a327fd0097c41095743c4c8af8887265942faf1100bd040"
 name = "camera-analytics"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "base64",
  "bstr",
  "bytes",
  "cstr",
@@ -761,9 +759,9 @@ dependencies = [
 
 [[package]]
 name = "http-auth"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2eaf042771da62e2195732e3af5bf46f782234cdfdf6010b6da19c18a855b6c"
+checksum = "26d3003cd46a8f8da3292b79488bc95917ef8c6cac33b39473e191bbff0dc85d"
 dependencies = [
  "base64",
  "digest",
